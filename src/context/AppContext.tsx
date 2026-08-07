@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
+import { buildArinSystemPrompt, parseAiDirective } from '../services/aiDirective';
 import { sendArduinoCommand } from '../services/arduinoService';
-import { sendDeviceCommand } from '../services/deviceService';
+import { formatInstalledApps, getInstalledApps, sendDeviceCommand } from '../services/deviceService';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
@@ -345,8 +345,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
+      // Inject a fresh list of installed apps into the system prompt so the
+      // model only picks real package names for OPEN_APP.
+      const apps = await getInstalledApps();
+      const systemPrompt = buildArinSystemPrompt(formatInstalledApps(apps));
       const localResponse = await sendChatCompletion(settings.localAiHost, settings.selectedModel, [
-        { role: 'system', content: ARIN_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: text },
       ]);
 

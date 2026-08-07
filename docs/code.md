@@ -1,6 +1,6 @@
 # ARIN — Full Source Code
 
-> 34 files
+> 37 files
 
 ---
 
@@ -137,6 +137,12 @@ dependencies {
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FLASHLIGHT" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
       android:name=".MainApplication"
@@ -163,6 +169,181 @@ dependencies {
     </application>
 </manifest>
 
+```
+
+---
+
+## `android/app/src/main/java/com/arin/ArinNativeModule.kt`
+
+```kotlin
+package com.arin
+
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.telephony.SmsManager
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.WritableArray
+import com.facebook.react.bridge.WritableMap
+
+class ArinNativeModule(reactContext: ReactApplicationContext) :
+  ReactContextBaseJavaModule(reactContext) {
+
+  override fun getName(): String = "ArinNative"
+
+  // ---------------- Torch ----------------
+
+  @ReactMethod
+  fun setTorch(enabled: Boolean, promise: Promise) {
+    val ctx = reactApplicationContext
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      promise.reject("UNSUPPORTED", "Torch requires Android 6.0+.")
+      return
+    }
+    try {
+      val manager = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+      val cameraId = manager.cameraIdList.firstOrNull { id ->
+        val characteristics = manager.getCameraCharacteristics(id)
+        characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+      } ?: manager.cameraIdList.firstOrNull()
+      if (cameraId == null) {
+        promise.reject("NO_CAMERA", "No camera found.")
+        return
+      }
+      manager.setTorchMode(cameraId, enabled)
+      promise.resolve(enabled)
+    } catch (e: Exception) {
+      promise.reject("TORCH_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Open Camera ----------------
+
+  @ReactMethod
+  fun openCamera(promise: Promise) {
+    val ctx = reactApplicationContext
+    val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+      ctx.startActivity(intent)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("CAMERA_OPEN_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Direct Call ----------------
+
+  @ReactMethod
+  fun callPhone(number: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    val uri = Uri.parse("tel:${Uri.encode(number)}")
+    try {
+      val intent = Intent(Intent.ACTION_CALL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(intent)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      // Fall back to the dialer if CALL_PHONE isn't granted.
+      try {
+        val dialIntent = Intent(Intent.ACTION_DIAL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(dialIntent)
+        promise.resolve(false)
+      } catch (e2: Throwable) {
+        promise.reject("CALL_FAILED", e2.message)
+      }
+    }
+  }
+
+  // ---------------- Direct SMS ----------------
+
+  @ReactMethod
+  fun sendSms(number: String, message: String, promise: Promise) {
+    try {
+      val manager = SmsManager.getDefault()
+      manager.sendTextMessage(number, null, message, null, null)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("SMS_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Installed Apps ----------------
+
+  @ReactMethod
+  fun getInstalledApps(promise: Promise) {
+    val ctx = reactApplicationContext
+    val array: WritableArray = Arguments.createArray()
+
+    val apps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      ctx.packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+    } else {
+      @Suppress("DEPRECATION")
+      ctx.packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+    }
+
+    for (app in apps) {
+      // Only include user-launchable apps (those with a launcher intent).
+      if (ctx.packageManager.getLaunchIntentForPackage(app.packageName) != null) {
+        val map: WritableMap = Arguments.createMap()
+        val label = ctx.packageManager.getApplicationLabel(app)?.toString() ?: app.packageName
+        map.putString("label", label)
+        map.putString("packageName", app.packageName)
+        array.pushMap(map)
+      }
+    }
+
+    promise.resolve(array)
+  }
+
+  // ---------------- Launch App by package ----------------
+
+  @ReactMethod
+  fun launchApp(packageName: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    val intent = ctx.packageManager.getLaunchIntentForPackage(packageName)
+    if (intent == null) {
+      promise.reject("APP_NOT_FOUND", "No launchable activity found for $packageName")
+      return
+    }
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+      ctx.startActivity(intent)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("LAUNCH_FAILED", e.message)
+    }
+  }
+}
+
+```
+
+---
+
+## `android/app/src/main/java/com/arin/ArinNativePackage.kt`
+
+```kotlin
+package com.arin
+
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.uimanager.ViewManager
+
+class ArinNativePackage : ReactPackage {
+  override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
+    listOf(ArinNativeModule(reactContext))
+
+  override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
+    emptyList()
+}
 ```
 
 ---
@@ -218,6 +399,7 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Packages that cannot be autolinked yet can be added manually here, for example:
           // add(MyReactNativePackage())
+          add(ArinNativePackage())
         },
     )
   }
@@ -1147,9 +1329,9 @@ const styles = StyleSheet.create({
 ```typescript
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
+import { buildArinSystemPrompt, parseAiDirective } from '../services/aiDirective';
 import { sendArduinoCommand } from '../services/arduinoService';
-import { sendDeviceCommand } from '../services/deviceService';
+import { formatInstalledApps, getInstalledApps, sendDeviceCommand } from '../services/deviceService';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
@@ -1492,8 +1674,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
+      // Inject a fresh list of installed apps into the system prompt so the
+      // model only picks real package names for OPEN_APP.
+      const apps = await getInstalledApps();
+      const systemPrompt = buildArinSystemPrompt(formatInstalledApps(apps));
       const localResponse = await sendChatCompletion(settings.localAiHost, settings.selectedModel, [
-        { role: 'system', content: ARIN_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: text },
       ]);
 
@@ -3087,47 +3273,66 @@ Schema:
   "response": string,        // required when action="respond"
   "prompt": string,          // required when action="cloud"
   "command": string,         // required when action="arduino" or "device"
-  "target": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP: a phone number or a contact/app name exactly as the user said it
-  "message": string,         // required for device commands SMS, WHATSAPP: the exact text to send
+  "target": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP
+  "message": string,         // required for device commands SMS, WHATSAPP
   "reason": string           // optional, one short phrase
 }
 
+AVAILABLE APPS ON THIS DEVICE (label — exact package name):
+{{AVAILABLE_APPS}}
+
 Deciding "respond" vs "cloud":
-Silently ask yourself: "Could the correct answer to this be different depending on what moment in time it is, or does it depend on something happening in the outside world right now?" This covers prices, exchange rates, scores, weather, news, schedules, current officeholders, stock values, "latest" or "current" anything, or any fact that changes day to day. If yes → action="cloud". If the answer is fixed regardless of when it's asked (definitions, math, how-to, code, translation, general knowledge, conversation, explanations, creative writing) → action="respond". Judge this from the meaning of the request, not by matching trigger words.
+Silently ask yourself: "Could the correct answer to this be different depending on what moment in time it is, or does it depend on something happening in the outside world right now?" If yes → action="cloud". If the answer is fixed regardless of when it's asked → action="respond". Judge this from the meaning of the request, not by matching trigger words. You do not have live internet access directly — but action="cloud" IS your mechanism for getting current information. Never say or imply "I don't have internet access" — emit action="cloud" instead.
 
-You do not have live internet access directly — but action="cloud" IS your mechanism for getting current information, not a limitation you lack a workaround for. Never say or imply "I don't have internet access," "I can't check real-time data," or similar — always emit action="cloud" instead of disclaiming.
+action="arduino": robot body/hardware only. "command" must be exactly one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.
 
-action="arduino": use when the user asks the physical ROBOT BODY to move or its onboard hardware to act. "command" must be exactly one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.
-
-action="device": use when the user wants the ANDROID PHONE itself (not the robot body) to do something — flashlight, camera, calling, texting, or opening an app. "command" must be exactly one of:
+action="device": the phone itself. "command" must be exactly one of:
 - TORCH_ON, TORCH_OFF — phone flashlight
 - CAMERA_OPEN — open the camera
-- CALL — dial "target" (a phone number or saved contact name)
-- SMS — send "message" as a text to "target" (a phone number)
-- WHATSAPP — send "message" to "target" (a phone number or contact name) via WhatsApp
-- OPEN_APP — open the app named in "target"
+- CALL — call "target" (phone number or contact name) — happens directly, no dialer screen
+- SMS — send "message" to "target" as a text — sends directly, no composer screen
+- WHATSAPP — send "message" to "target" via WhatsApp — this ALWAYS opens WhatsApp with the chat pre-filled; the user must tap Send themselves. This is a real limitation, not something you're doing wrong.
+- OPEN_APP — launch the app named in "target"
 
 Rules for device commands:
-- Never put a phone number or name inside "message" — it goes in "target".
-- "message" must be the exact words the user wants sent, nothing added or paraphrased.
-- If the user names a person instead of a number (e.g. "call Jay", "message Jay via whatsapp"), put the person's name as "target" exactly as given — the app resolves it to a contact.
-- If the destination app for a text isn't stated, assume plain SMS. Only use WHATSAPP when the user says "whatsapp" (or clearly names the app).
-- Distinguish TORCH (phone's own flashlight) from arduino's LED_ON/LED_OFF (robot's onboard LED) — "turn on the flash/torch/light on the phone" is device TORCH_ON; "turn on the robot's LED" is arduino LED_ON.
+- Never put a number or name inside "message" — it goes in "target". "message" must be the user's exact words, nothing added.
+- If the user names a person instead of a number, put the name as "target" exactly as given.
+- If no app is named for a text, assume plain SMS; only use WHATSAPP when the user says "whatsapp" or clearly names it.
+- For OPEN_APP, "target" MUST be copied exactly from the package name in the AVAILABLE APPS list above — never invent, guess, or shorten a package name. Match the user's request to the closest label in the list.
+- If the user asks to open an app that is NOT in the AVAILABLE APPS list, use action="respond" and say plainly that the app isn't installed — do not emit OPEN_APP with a guessed target.
+- Distinguish TORCH (phone's own flashlight) from arduino's LED_ON/LED_OFF (robot's onboard LED).
 
 Never combine actions. Never invent fields. Never wrap the JSON in backticks or code fences. Never add commentary before or after it.
 
 Examples:
 
 "Turn on the flash" → {"action":"device","command":"TORCH_ON"}
-"Open the camera" → {"action":"device","command":"CAMERA_OPEN"}
 "Call 1345" → {"action":"device","command":"CALL","target":"1345"}
 "Message 2343 hi" → {"action":"device","command":"SMS","target":"2343","message":"hi"}
-"Send hi to 24553" → {"action":"device","command":"SMS","target":"24553","message":"hi"}
 "Send hi to Jay via whatsapp" → {"action":"device","command":"WHATSAPP","target":"Jay","message":"hi"}
-"Open Spotify" → {"action":"device","command":"OPEN_APP","target":"Spotify"}
+"Open Spotify" (Spotify — com.spotify.music is in AVAILABLE APPS) → {"action":"device","command":"OPEN_APP","target":"com.spotify.music"}
+"Open BeReal" (not in AVAILABLE APPS) → {"action":"respond","response":"BeReal isn't installed on this device."}
 "What's today's gold rate?" → {"action":"cloud","prompt":"What is today's gold rate?"}
-"What's the capital of France?" → {"action":"respond","response":"The capital of France is Paris."}
 "Move forward" → {"action":"arduino","command":"MOVE_FORWARD"}`;
+
+/**
+ * Default installed-app list injected at {{AVAILABLE_APPS}} until the native
+ * PackageManager module lands. Format: `label — packageName` per line.
+ */
+export const DEFAULT_AVAILABLE_APPS = `Camera — com.android.camera
+Settings — com.android.settings
+Spotify — com.spotify.music
+WhatsApp — com.whatsapp
+YouTube — com.google.android.youtube`;
+
+/**
+ * Build the system prompt with the device's installed-app list substituted for
+ * {{AVAILABLE_APPS}}. Falls back to DEFAULT_AVAILABLE_APPS if none passed.
+ */
+export function buildArinSystemPrompt(availableApps?: string): string {
+  const apps = availableApps?.trim() || DEFAULT_AVAILABLE_APPS;
+  return ARIN_SYSTEM_PROMPT.replace('{{AVAILABLE_APPS}}', apps);
+}
 
 export const ARDUINO_COMMANDS = [
   'MOVE_FORWARD',
@@ -3470,57 +3675,119 @@ export async function sendChatCompletion(
 ```typescript
 import { Linking } from 'react-native';
 import { DeviceCommand } from './aiDirective';
+import { arinNative, hasNativeBridge, InstalledAppNative } from './nativeDeviceModule';
 
 export interface DeviceCommandResult {
   success: boolean;
   message: string;
 }
 
+export interface InstalledApp {
+  label: string;
+  packageName: string;
+}
+
 /**
- * Execute a single phone-native command via Android intents/deep links.
+ * List apps installed on the phone, fed into the prompt's {{AVAILABLE_APPS}}.
  *
- * Reality notes:
- * - CALL / SMS need CALL_PHONE / SEND_SMS permissions on the native side to fire
- *   silently; without them Android will show its own confirmation UI.
- * - WHATSAPP has no fully-silent API — we deep-link into wa.me with the message
- *   pre-filled and let the user tap Send. This is expected behavior.
- * - CAMERA_OPEN / OPEN_APP open an external screen by design.
+ * Uses the native PackageManager module when available; otherwise returns a
+ * small curated placeholder so OPEN_APP still has valid package names.
+ */
+export async function getInstalledApps(): Promise<InstalledApp[]> {
+  if (hasNativeBridge && arinNative) {
+    try {
+      const apps: InstalledAppNative[] = await arinNative.getInstalledApps();
+      if (apps.length > 0) {
+        return apps;
+      }
+    } catch {
+      // fall through to placeholder
+    }
+  }
+  return [
+    { label: 'Camera', packageName: 'com.android.camera' },
+    { label: 'Settings', packageName: 'com.android.settings' },
+    { label: 'Spotify', packageName: 'com.spotify.music' },
+    { label: 'WhatsApp', packageName: 'com.whatsapp' },
+    { label: 'YouTube', packageName: 'com.google.android.youtube' },
+  ];
+}
+
+/** Format installed apps as the "label — packageName" list the prompt expects. */
+export function formatInstalledApps(apps: InstalledApp[]): string {
+  return apps.map((app) => `${app.label} — ${app.packageName}`).join('\n');
+}
+
+/**
+ * Execute a single phone-native command.
+ *
+ * Native path (Android): silent CALL via ACTION_CALL, silent SMS via
+ * SmsManager.sendTextMessage, torch via CameraManager.setTorchMode, and
+ * OPEN_APP via getLaunchIntentForPackage. Each falls back to Linking deep
+ * links when the native bridge is missing or permission is denied.
  */
 export async function sendDeviceCommand(
   command: DeviceCommand,
   target?: string,
   message?: string,
-  permissionMode?: 'full_control' | 'compatible'
+  _permissionMode?: 'full_control' | 'compatible'
 ): Promise<DeviceCommandResult> {
-  const confirm = permissionMode !== 'full_control';
-
   switch (command) {
     case 'TORCH_ON':
     case 'TORCH_OFF': {
-      const state = command === 'TORCH_ON' ? 'on' : 'off';
-      // TODO: wire to the native CameraManager.setTorchMode module once added.
+      const enabled = command === 'TORCH_ON';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.setTorch(enabled);
+          return { success: true, message: `Phone flashlight turned ${enabled ? 'on' : 'off'}.` };
+        } catch (err) {
+          return {
+            success: false,
+            message: `Torch failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
       return {
         success: true,
-        message: `Phone flashlight turned ${state}${confirm ? ' (requires native torch module)' : ''}.`,
+        message: `Phone flashlight turned ${enabled ? 'on' : 'off'} (no native module — not actually switched).`,
       };
     }
 
     case 'CAMERA_OPEN': {
-      try {
-        await Linking.openURL('content://media/external/images/media');
-        return { success: true, message: 'Opened camera/media viewer.' };
-      } catch {
-        return { success: false, message: 'Failed to open camera.' };
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.openCamera();
+          return { success: true, message: 'Opened the camera app.' };
+        } catch (err) {
+          return {
+            success: false,
+            message: `Failed to open camera: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
       }
+      return { success: false, message: 'Camera not available (no native module).' };
     }
 
     case 'CALL': {
       if (!target) {
         return { success: false, message: 'No target specified for CALL.' };
       }
+      if (hasNativeBridge && arinNative) {
+        try {
+          const direct = await arinNative.callPhone(target);
+          return direct
+            ? { success: true, message: `Calling ${target}...` }
+            : { success: true, message: `Opening dialer for ${target} (CALL_PHONE permission missing).` };
+        } catch (err) {
+          return {
+            success: false,
+            message: `Call failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
       try {
         await Linking.openURL(`tel:${encodeURIComponent(target)}`);
-        return { success: true, message: `Dialing ${target}...` };
+        return { success: true, message: `Opening dialer for ${target}...` };
       } catch {
         return { success: false, message: `Failed to dial ${target}.` };
       }
@@ -3529,6 +3796,20 @@ export async function sendDeviceCommand(
     case 'SMS': {
       if (!target) {
         return { success: false, message: 'No target specified for SMS.' };
+      }
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.sendSms(target, message ?? '');
+          return {
+            success: true,
+            message: `SMS sent to ${target}${message ? `: "${message}"` : ''}.`,
+          };
+        } catch (err) {
+          return {
+            success: false,
+            message: `SMS failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
       }
       try {
         const body = encodeURIComponent(message ?? '');
@@ -3543,6 +3824,7 @@ export async function sendDeviceCommand(
       if (!target) {
         return { success: false, message: 'No target specified for WHATSAPP.' };
       }
+      // No silent API exists for WhatsApp — deep-link with the chat pre-filled.
       try {
         const digits = target.replace(/[^0-9]/g, '');
         const text = encodeURIComponent(message ?? '');
@@ -3560,11 +3842,18 @@ export async function sendDeviceCommand(
       if (!target) {
         return { success: false, message: 'No target app specified.' };
       }
-      // TODO: resolve friendly app names to package deep links (e.g. spotify:, camera:).
-      return {
-        success: true,
-        message: `Opening app "${target}"${confirm ? ' (requires confirm)' : ''}.`,
-      };
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.launchApp(target);
+          return { success: true, message: `Opened ${target}.` };
+        } catch (err) {
+          return {
+            success: false,
+            message: `Failed to open ${target}: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
+      return { success: true, message: `Opening app "${target}" (no native module).` };
     }
 
     default:
@@ -4063,6 +4352,40 @@ export async function sendChatCompletion(
   return response;
 }
 
+```
+
+---
+
+## `src/services/nativeDeviceModule.ts`
+
+```typescript
+import { NativeModules, Platform } from 'react-native';
+
+export interface InstalledAppNative {
+  label: string;
+  packageName: string;
+}
+
+interface ArinNativeBridge {
+  setTorch(enabled: boolean): Promise<boolean>;
+  openCamera(): Promise<boolean>;
+  callPhone(number: string): Promise<boolean>;
+  sendSms(number: string, message: string): Promise<boolean>;
+  getInstalledApps(): Promise<InstalledAppNative[]>;
+  launchApp(packageName: string): Promise<boolean>;
+}
+
+/**
+ * Thin wrapper around the ArinNative Kotlin module.
+ *
+ * On iOS (or if the module failed to register) these resolve as unsupported so
+ * the JS deviceService can degrade to Linking/open-URL behavior instead of
+ * throwing. On Android we'll get the real native bridge.
+ */
+export const arinNative: ArinNativeBridge | null =
+  Platform.OS === 'android' ? ((NativeModules.ArinNative as ArinNativeBridge) ?? null) : null;
+
+export const hasNativeBridge = arinNative != null;
 ```
 
 ---
