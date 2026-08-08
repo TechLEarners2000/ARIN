@@ -1,6 +1,6 @@
 # ARIN — Full Source Code
 
-> 37 files
+> 41 files
 
 ---
 
@@ -143,6 +143,14 @@ dependencies {
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
       android:name=".MainApplication"
@@ -178,14 +186,21 @@ dependencies {
 ```kotlin
 package com.arin
 
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
+import android.provider.ContactsContract
 import android.provider.MediaStore
+import android.provider.Settings
 import android.telephony.SmsManager
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
@@ -243,14 +258,23 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
   // ---------------- Direct Call ----------------
 
   @ReactMethod
-  fun callPhone(number: String, promise: Promise) {
+  fun callPhone(target: String, promise: Promise) {
     val ctx = reactApplicationContext
-    val uri = Uri.parse("tel:${Uri.encode(number)}")
+    val resolved = try {
+      resolveContact(ctx, target)
+    } catch (se: SecurityException) {
+      promise.reject("CONTACT_PERMISSION", "READ_CONTACTS permission not granted — give a phone number instead.")
+      return
+    }
+    if (resolved == null) {
+      promise.reject("CONTACT_NOT_FOUND", "No contact found matching \"$target\".")
+      return
+    }
+    val uri = Uri.parse("tel:${Uri.encode(resolved.number)}")
     try {
       val intent = Intent(Intent.ACTION_CALL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       ctx.startActivity(intent)
-      promise.resolve(true)
-    } catch (e: Throwable) {
+      promise.resolve(true)    } catch (e: Throwable) {
       // Fall back to the dialer if CALL_PHONE isn't granted.
       try {
         val dialIntent = Intent(Intent.ACTION_DIAL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -265,10 +289,21 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
   // ---------------- Direct SMS ----------------
 
   @ReactMethod
-  fun sendSms(number: String, message: String, promise: Promise) {
+  fun sendSms(target: String, message: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    val resolved = try {
+      resolveContact(ctx, target)
+    } catch (se: SecurityException) {
+      promise.reject("CONTACT_PERMISSION", "READ_CONTACTS permission not granted — give a phone number instead.")
+      return
+    }
+    if (resolved == null) {
+      promise.reject("CONTACT_NOT_FOUND", "No contact found matching \"$target\".")
+      return
+    }
     try {
       val manager = SmsManager.getDefault()
-      manager.sendTextMessage(number, null, message, null, null)
+      manager.sendTextMessage(resolved.number, null, message, null, null)
       promise.resolve(true)
     } catch (e: Throwable) {
       promise.reject("SMS_FAILED", e.message)
@@ -303,14 +338,41 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     promise.resolve(array)
   }
 
-  // ---------------- Launch App by package ----------------
+  // ---------------- Contact Names (names only — numbers never leave device) ----------------
 
   @ReactMethod
-  fun launchApp(packageName: String, promise: Promise) {
+  fun getContactNames(promise: Promise) {
     val ctx = reactApplicationContext
-    val intent = ctx.packageManager.getLaunchIntentForPackage(packageName)
+    val names = try {
+      queryContacts(ctx)
+    } catch (se: SecurityException) {
+      promise.reject("CONTACT_PERMISSION", "READ_CONTACTS permission not granted.")
+      return
+    }
+    val array: WritableArray = Arguments.createArray()
+    val seen = mutableSetOf<String>()
+    for (contact in names) {
+      val name = contact.name.trim()
+      if (name.isNotEmpty() && seen.add(name.lowercase())) {
+        array.pushString(name)
+      }
+    }
+    promise.resolve(array)
+  }
+
+  // ---------------- Launch App by name or package ----------------
+
+  @ReactMethod
+  fun launchApp(target: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    val resolved = resolveApp(ctx, target)
+    val intent = if (resolved != null) {
+      ctx.packageManager.getLaunchIntentForPackage(resolved)
+    } else {
+      null
+    }
     if (intent == null) {
-      promise.reject("APP_NOT_FOUND", "No launchable activity found for $packageName")
+      promise.reject("APP_NOT_FOUND", "No app found matching \"$target\"")
       return
     }
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -320,6 +382,441 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     } catch (e: Throwable) {
       promise.reject("LAUNCH_FAILED", e.message)
     }
+  }
+
+  // ---------------- Wi-Fi Toggle & Fallback Settings ----------------
+
+  @ReactMethod
+  fun setWifi(enabled: Boolean, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      @Suppress("DEPRECATION")
+      val wifiManager = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+      @Suppress("DEPRECATION")
+      val success = wifiManager?.setWifiEnabled(enabled) ?: false
+      if (success) {
+        promise.resolve("TOGGLED_DIRECTLY")
+        return
+      }
+    } catch (_: Throwable) {
+      // Fall through to open settings panel on Android 10+ or restricted devices
+    }
+
+    try {
+      val intent = Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(intent)
+      promise.resolve("OPENED_SETTINGS")
+    } catch (e: Throwable) {
+      promise.reject("WIFI_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Bluetooth Toggle & Fallback Settings ----------------
+
+  @ReactMethod
+  fun setBluetooth(enabled: Boolean, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      @Suppress("DEPRECATION")
+      val adapter = BluetoothAdapter.getDefaultAdapter()
+      if (adapter != null) {
+        @Suppress("DEPRECATION")
+        val success = if (enabled) adapter.enable() else adapter.disable()
+        if (success) {
+          promise.resolve("TOGGLED_DIRECTLY")
+          return
+        }
+      }
+    } catch (_: Throwable) {
+      // Fall through to Bluetooth Settings
+    }
+
+    try {
+      val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(intent)
+      promise.resolve("OPENED_SETTINGS")
+    } catch (e: Throwable) {
+      promise.reject("BLUETOOTH_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Open Settings Screen ----------------
+
+  @ReactMethod
+  fun openSettings(target: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    val trimmedTarget = target.lowercase().trim()
+
+    // Check if opening App Info for a specific app (e.g. "spotify app info", "whatsapp", "camera app info")
+    val isAppInfoRequest = trimmedTarget.contains("app info") || trimmedTarget.contains("app_info") || trimmedTarget.startsWith("app ")
+    val cleanAppName = trimmedTarget.replace("app info", "").replace("app_info", "").replace("app", "").trim()
+
+    var targetPackageName: String? = null
+    if (isAppInfoRequest && cleanAppName.isNotEmpty()) {
+      targetPackageName = resolveApp(ctx, cleanAppName)
+    } else if (!isAppInfoRequest && !listOf("wifi", "bluetooth", "nfc", "airplane", "location", "gps", "display", "brightness", "battery", "power", "developer", "dev", "sound", "volume", "storage", "hotspot", "tethering", "settings").contains(trimmedTarget)) {
+      // If target is an app name directly passed to openSettings (e.g. target="Spotify")
+      targetPackageName = resolveApp(ctx, trimmedTarget)
+    }
+
+    val action = when {
+      targetPackageName != null -> Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+      trimmedTarget.contains("wifi") -> Settings.ACTION_WIFI_SETTINGS
+      trimmedTarget.contains("bluetooth") -> Settings.ACTION_BLUETOOTH_SETTINGS
+      trimmedTarget.contains("nfc") -> Settings.ACTION_NFC_SETTINGS
+      trimmedTarget.contains("airplane") -> Settings.ACTION_AIRPLANE_MODE_SETTINGS
+      trimmedTarget.contains("location") || trimmedTarget.contains("gps") -> Settings.ACTION_LOCATION_SOURCE_SETTINGS
+      trimmedTarget.contains("display") || trimmedTarget.contains("brightness") -> Settings.ACTION_DISPLAY_SETTINGS
+      trimmedTarget.contains("battery") || trimmedTarget.contains("power") -> Intent.ACTION_POWER_USAGE_SUMMARY
+      trimmedTarget.contains("developer") || trimmedTarget.contains("dev") -> Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS
+      trimmedTarget.contains("sound") || trimmedTarget.contains("volume") -> Settings.ACTION_SOUND_SETTINGS
+      trimmedTarget.contains("storage") -> Settings.ACTION_INTERNAL_STORAGE_SETTINGS
+      trimmedTarget.contains("app_info") || trimmedTarget.contains("appinfo") -> Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+      trimmedTarget.contains("hotspot") || trimmedTarget.contains("tethering") -> Settings.ACTION_WIRELESS_SETTINGS
+      else -> Settings.ACTION_SETTINGS
+    }
+
+    try {
+      val intent = if (action == Settings.ACTION_APPLICATION_DETAILS_SETTINGS) {
+        val pkg = targetPackageName ?: ctx.packageName
+        Intent(action, Uri.fromParts("package", pkg, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      } else {
+        Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      ctx.startActivity(intent)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      // Fall back to general settings if specific action fails
+      try {
+        val fallback = Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(fallback)
+        promise.resolve(true)
+      } catch (e2: Throwable) {
+        promise.reject("SETTINGS_FAILED", e2.message)
+      }
+    }
+  }
+
+  // ---------------- Sound & Ringer Mode ----------------
+
+  @ReactMethod
+  fun setRingerMode(mode: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      when (mode.uppercase().trim()) {
+        "SILENT" -> audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
+        "VIBRATE" -> audioManager.ringerMode = AudioManager.RINGER_MODE_VIBRATE
+        else -> audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+      }
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("RINGER_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Volume Adjustment & Direct Percentage ----------------
+
+  @ReactMethod
+  fun setVolumePercent(percent: Int, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      val clampedPercent = percent.coerceIn(0, 100)
+
+      if (clampedPercent == 0) {
+        audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
+        val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, minVol, AudioManager.FLAG_SHOW_UI)
+      } else {
+        if (audioManager.ringerMode == AudioManager.RINGER_MODE_SILENT) {
+          audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+        }
+        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val targetVol = (maxVol * clampedPercent / 100.0f).toInt().coerceIn(1, maxVol)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, AudioManager.FLAG_SHOW_UI)
+      }
+      promise.resolve(clampedPercent)
+    } catch (e: Throwable) {
+      promise.reject("VOLUME_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun adjustVolume(direction: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      val dir = if (direction.uppercase().trim() == "UP") AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+      audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("VOLUME_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Battery Status ----------------
+
+  @ReactMethod
+  fun getBatteryStatus(promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val intent = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+      val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+      val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+      val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+
+      val pct = if (level >= 0 && scale > 0) (level * 100 / scale.toFloat()).toInt() else 0
+      val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+
+      val map = Arguments.createMap()
+      map.putInt("level", pct)
+      map.putBoolean("isCharging", isCharging)
+      promise.resolve(map)
+    } catch (e: Throwable) {
+      promise.reject("BATTERY_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Fuzzy App Resolution ----------------
+
+  private data class AppMatch(val label: String, val packageName: String)
+
+  /** Best-effort resolve of a user-spoken app name or package to a real installable package. */
+  private fun resolveApp(ctx: Context, target: String): String? {
+    val trimmed = target.trim()
+    if (trimmed.isEmpty()) return null
+
+    // Exact package always wins — cheap and unambiguous.
+    if (ctx.packageManager.getLaunchIntentForPackage(trimmed) != null) {
+      return trimmed
+    }
+
+    val apps = queryLaunchableApps(ctx)
+    if (apps.isEmpty()) return null
+
+    val want = normalized(trimmed)
+    val wantTokens = want.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val wantSoundex = soundex(wantTokens.firstOrNull() ?: want)
+
+    var best: AppMatch? = null
+    var bestScore = -1.0
+
+    for (app in apps) {
+      // Match against label AND package trailing segment (e.g. "youtube",
+      // "spotify.music") so both "Spotify" and "spotify" hit com.spotify.music.
+      val labelNorm = normalized(app.label)
+      val pkgKey = normalized(app.packageName.substringAfterLast('.').replace('.', ' '))
+
+      var score = scoreMatch(labelNorm, want, wantTokens, wantSoundex)
+      if (score < 0) {
+        score = scoreMatch(pkgKey, want, wantTokens, wantSoundex)
+      }
+      if (score > bestScore) {
+        bestScore = score
+        best = app
+      }
+    }
+
+    return if (bestScore > 40.0) best?.packageName else null
+  }
+
+  private fun scoreMatch(
+    candidate: String,
+    want: String,
+    wantTokens: List<String>,
+    wantSoundex: String
+  ): Double {
+    if (candidate.isEmpty()) return -1.0
+    val tokens = candidate.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    var score = -1.0
+    when {
+      candidate == want -> score = 100.0
+      tokens.contains(want) || wantTokens.contains(candidate) -> score = 90.0
+      tokens.any { it.startsWith(want) } || wantTokens.any { wt -> tokens.any { it.startsWith(wt) } } -> score = 80.0
+      else -> {
+        val bestTokenDist: Double = if (wantTokens.isEmpty() || tokens.isEmpty()) {
+          Double.MAX_VALUE
+        } else {
+          wantTokens.minOf { wt ->
+            tokens.minOf { tok -> levenshtein(wt, tok).toDouble() / maxOf(wt.length, tok.length) }
+          }
+        }
+        val minNormDist = minOf(
+          levenshtein(want, candidate).toDouble() / maxOf(want.length, candidate.length),
+          bestTokenDist
+        )
+        if (minNormDist <= 0.30) {
+          score = 85.0 - (minNormDist / 0.30) * 30.0
+        } else if (
+          want.length >= 3 &&
+          soundex(tokens.firstOrNull() ?: candidate) == wantSoundex
+        ) {
+          score = 50.0
+        }
+      }
+    }
+    return score
+  }
+
+  private fun queryLaunchableApps(ctx: Context): List<AppMatch> {
+    val result = mutableListOf<AppMatch>()
+    val apps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      ctx.packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+    } else {
+      @Suppress("DEPRECATION")
+      ctx.packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+    }
+    for (app in apps) {
+      if (ctx.packageManager.getLaunchIntentForPackage(app.packageName) != null) {
+        val label = ctx.packageManager.getApplicationLabel(app)?.toString() ?: app.packageName
+        result.add(AppMatch(label, app.packageName))
+      }
+    }
+    return result
+  }
+
+  // ---------------- Fuzzy Contact Resolution ----------------
+
+  private data class ContactMatch(val name: String, val number: String)
+
+  private fun isPhoneNumber(target: String): Boolean =
+    target.count { it.isDigit() } >= 5
+
+  /**
+   * Resolve a user-supplied target (name or number) to a real contact number.
+   * Matching tiers, best wins: exact name -> token match -> prefix -> fuzzy
+   * (Levenshtein) -> phonetic (Soundex). Returns null when nothing is close.
+   */
+  private fun resolveContact(ctx: Context, target: String): ContactMatch? {
+    val trimmed = target.trim()
+    if (trimmed.isEmpty()) return null
+    if (isPhoneNumber(trimmed)) return ContactMatch(trimmed, trimmed)
+
+    val contacts = queryContacts(ctx)
+    if (contacts.isEmpty()) return null
+
+    val want = normalized(trimmed)
+    val wantTokens = want.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val wantSoundex = soundex(wantTokens.firstOrNull() ?: want)
+
+    var best: ContactMatch? = null
+    var bestScore = -1.0
+
+    for (contact in contacts) {
+      val nameNorm = normalized(contact.name)
+      if (nameNorm.isEmpty()) continue
+      val tokens = nameNorm.split(Regex("\\s+")).filter { it.isNotEmpty() }
+
+      var score: Double = -1.0
+
+      when {
+        nameNorm == want -> score = 100.0
+        tokens.contains(want) || wantTokens.contains(nameNorm) -> score = 90.0
+        tokens.any { it.startsWith(want) } || wantTokens.any { wt -> tokens.any { it.startsWith(wt) } } -> score = 80.0
+        else -> {
+          val minNormDist = minOf(
+            levenshtein(want, nameNorm).toDouble() / maxOf(want.length, nameNorm.length),
+            wantTokens.minOf { wt ->
+              tokens.minOf { tok -> levenshtein(wt, tok).toDouble() / maxOf(wt.length, tok.length) }
+            }
+          )
+          if (minNormDist <= 0.30) {
+            // Close enough to accept ("jon" ~ "John", "karinI" ~ "Karthik").
+            // Score between 55 (borderline) and 85 (near exact) so the closest
+            // candidate wins while clearly weaker ones are still accepted.
+            score = 85.0 - (minNormDist / 0.30) * 30.0
+          } else if (
+            want.length >= 3 &&
+            soundex(tokens.firstOrNull() ?: nameNorm) == wantSoundex
+          ) {
+            // Phonetic fallback: "areen" ~ "Arin", "rajnish" ~ "Rajan" — dist
+            // can be high even when spoken names sound identical.
+            score = 50.0
+          }
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score
+        best = contact
+      }
+    }
+
+    return if (bestScore > 40.0) best else null
+  }
+
+  private fun queryContacts(ctx: Context): List<ContactMatch> {
+    val result = mutableListOf<ContactMatch>()
+    val projection = arrayOf(
+      ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+      ContactsContract.CommonDataKinds.Phone.NUMBER
+    )
+    val cursor = ctx.contentResolver.query(
+      ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+      projection,
+      null,
+      null,
+      ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+    ) ?: return result
+
+    cursor.use {
+      val nameIdx = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+      val numIdx = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+      while (it.moveToNext()) {
+        val name = it.getString(nameIdx) ?: continue
+        val number = it.getString(numIdx) ?: continue
+        result.add(ContactMatch(name, number))
+      }
+    }
+    return result
+  }
+
+  private fun normalized(s: String): String =
+    s.lowercase().replace(Regex("[^a-z0-9\\s]"), "").trim()
+
+  private fun levenshtein(a: String, b: String): Int {
+    if (a.isEmpty()) return b.length
+    if (b.isEmpty()) return a.length
+    val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+    for (i in 0..a.length) dp[i][0] = i
+    for (j in 0..b.length) dp[0][j] = j
+    for (i in 1..a.length) {
+      for (j in 1..b.length) {
+        val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+        dp[i][j] = minOf(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+      }
+    }
+    return dp[a.length][b.length]
+  }
+
+  /** Classic American Soundex — maps similar-sounding names to the same key. */
+  private fun soundex(input: String): String {
+    val s = input.lowercase().replace(Regex("[^a-z]"), "")
+    if (s.isEmpty()) return ""
+    val sb = StringBuilder()
+    sb.append(s[0].uppercase())
+    var prev = soundexDigit(s[0])
+    for (i in 1 until s.length) {
+      val c = s[i]
+      if (c == 'h' || c == 'w') continue
+      val d = soundexDigit(c)
+      if (d != prev && d != '0') {
+        sb.append(d)
+        prev = d
+      }
+    }
+    return (sb.toString() + "000").substring(0, 4)
+  }
+
+  private fun soundexDigit(c: Char): Char = when (c) {
+    'b', 'f', 'p', 'v' -> '1'
+    'c', 'g', 'j', 'k', 'q', 's', 'x', 'z' -> '2'
+    'd', 't' -> '3'
+    'l' -> '4'
+    'm', 'n' -> '5'
+    'r' -> '6'
+    else -> '0'
   }
 }
 
@@ -1050,6 +1547,8 @@ const stageLabels: Record<ExecutionStage, string> = {
   cloud_processing: 'Cloud AI',
   arduino_executing: 'Arduino',
   device_executing: 'Device',
+  speaking: 'Speaking',
+  pipeline_executing: 'Pipeline',
   response_received: 'Response',
   done: 'Done',
   error: 'Error',
@@ -1328,17 +1827,21 @@ const styles = StyleSheet.create({
 
 ```typescript
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { buildArinSystemPrompt, parseAiDirective } from '../services/aiDirective';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
 import { sendArduinoCommand } from '../services/arduinoService';
-import { formatInstalledApps, getInstalledApps, sendDeviceCommand } from '../services/deviceService';
+import { sendDeviceCommand, speakText } from '../services/deviceService';
+import { runPipeline } from '../services/pipelineExecutor';
+import { rearmPersistedJobs, scheduleJob } from '../services/schedulerService';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
   testConnection as testCloudConnection,
 } from '../services/cloudAiService';
 import {
+  ARIN_MODEL_NAME,
   fetchModels as fetchModelsService,
+  initArinModel,
   sendChatCompletion,
   testConnection,
 } from '../services/localAiService';
@@ -1392,6 +1895,7 @@ const initialSettings: AppSettings = {
   arduinoConnected: false,
   arduinoStatus: 'disconnected',
   permissionMode: 'compatible',
+  preloadedModel: null,
 };
 
 const initialMessages: ChatMessageItem[] = [
@@ -1457,6 +1961,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     loadSavedState();
   }, []);
 
+  useEffect(() => {
+    rearmPersistedJobs((directive) => {
+      executeDirectiveNow(directive, /* fromScheduler */ true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Preload (init) the ARIN model once per host+model per connection epoch:
+  // bake the system prompt into an Ollama custom model so subsequent chat
+  // requests only carry the user's short message. A failed attempt is retried
+  // on the next successful connection (epoch bump in connectLocalAi).
+  const initAttemptedKeyRef = useRef<string>('');
+  const connectionEpochRef = useRef(0);
+
+  useEffect(() => {
+    const ready =
+      settings.localAiEnabled &&
+      settings.localAiStatus === 'connected' &&
+      !!settings.selectedModel;
+    if (!ready) return;
+
+    const key = `${connectionEpochRef.current}|${settings.localAiHost}|${settings.selectedModel}`;
+    if (initAttemptedKeyRef.current === key) return;
+    initAttemptedKeyRef.current = key;
+
+    let cancelled = false;
+    setTestLogs((prev) => [
+      `[INIT] Baking system prompt into "${ARIN_MODEL_NAME}" (from "${settings.selectedModel}")...`,
+      ...prev,
+    ]);
+
+    (async () => {
+      try {
+        await initArinModel(settings.localAiHost, settings.selectedModel, ARIN_SYSTEM_PROMPT);
+        if (cancelled) return;
+        updateSettings({
+          preloadedModel: ARIN_MODEL_NAME,
+          localAiModels: settings.localAiModels.includes(ARIN_MODEL_NAME)
+            ? settings.localAiModels
+            : [...settings.localAiModels, ARIN_MODEL_NAME],
+        });
+        setTestLogs((prev) => [
+          `[INIT] "${ARIN_MODEL_NAME}" ready — only short user messages will be sent.`,
+          ...prev,
+        ]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (Date.now() + 1).toString(),
+            sender: 'ARIN',
+            text: `ARIN system prompt initialized into the local model. Stop words like "hi" or "call 987" are now enough — the full rules stay with the model.`,
+            timestamp: new Date().toLocaleTimeString(),
+          },
+        ]);
+      } catch (error: unknown) {
+        if (cancelled) return;
+        const errMsg = error instanceof Error ? error.message : String(error);
+        setTestLogs((prev) => [
+          `[INIT] Failed: ${errMsg} — falling back to sending the prompt per request.`,
+          ...prev,
+        ]);
+        updateSettings({ preloadedModel: null });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    settings.localAiEnabled,
+    settings.localAiStatus,
+    settings.localAiHost,
+    settings.selectedModel,
+    settings.localAiModels,
+  ]);
+
   const finishSplash = () => {
     setIsSplashVisible(false);
   };
@@ -1517,6 +2097,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTestLogs((prev) => [`[CONN] Failed: ${result.message}`, ...prev]);
       return false;
     }
+
+    connectionEpochRef.current += 1;
 
     const modelIds = result.models
       ? result.models.map((m) => m.id)
@@ -1637,6 +2219,133 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTimeout(() => setCurrentStage('idle'), 1500);
   };
 
+  /**
+   * Shared executor for a single directive, used by both the immediate
+   * sendMessage path and the scheduler-fired path. Handles pipelines, and the
+   * respond/speak/arduino/device/cloud branches.
+   */
+  const executeDirectiveNow = async (directive: AiDirective, fromScheduler = false) => {
+    if (fromScheduler) {
+      setIsProcessing(true);
+      setStageErrorMsg(null);
+    }
+
+    // Build the visual pipeline dynamically from the directive contents.
+    const path: ExecutionStage[] = ['request_sent', 'local_processing'];
+    if (directive.action === 'cloud') {
+      path.push('cloud_processing');
+    }
+    if (directive.action === 'arduino') {
+      path.push('arduino_executing');
+    }
+    if (directive.action === 'device') {
+      path.push('device_executing');
+    }
+    if (directive.action === 'speak') {
+      path.push('speaking');
+    }
+    if (directive.action === 'pipeline') {
+      path.push('pipeline_executing');
+    }
+    path.push('response_received', 'done');
+    setPipelinePath(path);
+    setCurrentStage(
+      directive.action === 'cloud'
+        ? 'cloud_processing'
+        : directive.action === 'arduino'
+        ? 'arduino_executing'
+        : directive.action === 'device'
+        ? 'device_executing'
+        : directive.action === 'speak'
+        ? 'speaking'
+        : directive.action === 'pipeline'
+        ? 'pipeline_executing'
+        : 'response_received'
+    );
+
+    if (directive.action === 'pipeline') {
+      setTestLogs((prev) => [
+        `[EXEC] Pipeline: ${directive.steps.length} step(s)${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await runPipeline(directive.steps, settings, (line) =>
+        setTestLogs((prev) => [line, ...prev])
+      );
+      finishWithReply(result.finalText || (result.stoppedEarly ? 'Pipeline stopped.' : 'Pipeline complete.'));
+      return;
+    }
+
+    if (directive.action === 'respond') {
+      await new Promise<void>((resolve) => setTimeout(() => resolve(), 250));
+      setTestLogs((prev) => [`[SYS] Local AI responded directly.`, ...prev]);
+      finishWithReply(directive.response);
+      return;
+    }
+
+    if (directive.action === 'speak') {
+      const r = await speakText(directive.message);
+      setTestLogs((prev) => [`[SPEAK] ${r.message}`, ...prev]);
+      finishWithReply(r.message);
+      return;
+    }
+
+    if (directive.action === 'arduino') {
+      setTestLogs((prev) => [
+        `[EXEC] Arduino command: ${directive.command}${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await sendArduinoCommand(directive.command, settings.arduinoConnected);
+      setCurrentStage('response_received');
+      setTestLogs((prev) => [`[ARDUINO] ${result.message}`, ...prev]);
+      finishWithReply(result.message);
+      return;
+    }
+
+    if (directive.action === 'device') {
+      setTestLogs((prev) => [
+        `[EXEC] Device command: ${directive.command}${directive.target ? ` target="${directive.target}"` : ''}${directive.message ? ` message="${directive.message}"` : ''}${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await sendDeviceCommand(
+        directive.command,
+        directive.target,
+        directive.message,
+        settings.permissionMode
+      );
+      setCurrentStage('response_received');
+      setTestLogs((prev) => [`[DEVICE] ${result.message}`, ...prev]);
+      finishWithReply(result.message);
+      return;
+    }
+
+    // directive.action === 'cloud'
+    setTestLogs((prev) => [
+      `[SYS] Local AI delegated to cloud: "${directive.prompt}"${directive.reason ? ` (${directive.reason})` : ''}`,
+      ...prev,
+    ]);
+    const cloudReady = settings.cloudEnabled && settings.cloudStatus === 'connected';
+    if (!cloudReady) {
+      appendError('[ERR 502] Local AI requested cloud AI, but cloud is not connected. Set it up in SETUP.');
+      return;
+    }
+    if (!settings.selectedCloudModel) {
+      appendError('[ERR 412] Local AI requested cloud AI, but no cloud model is selected.');
+      return;
+    }
+    const cloudResponse = await sendCloudChatCompletion(
+      settings.cloudBaseUrl,
+      settings.cloudApiKey,
+      settings.selectedCloudModel,
+      [{ role: 'user', content: directive.prompt }]
+    );
+    const cloudText =
+      cloudResponse.choices?.[0]?.message?.content?.trim() ??
+      '[ERR] Empty response received from cloud AI.';
+    setCurrentStage('response_received');
+    setTestLogs((prev) => [`[CLOUD] Responded via "${settings.selectedCloudModel}"`, ...prev]);
+    finishWithReply(cloudText);
+  };
+
   const sendMessage = async (text: string) => {
     const userMsg: ChatMessageItem = {
       id: Date.now().toString(),
@@ -1656,7 +2365,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentStage('local_processing');
 
     const localReady = settings.localAiEnabled && settings.localAiStatus === 'connected';
-    const cloudReady = settings.cloudEnabled && settings.cloudStatus === 'connected';
 
     // Local AI is primary and drives all routing decisions via ARIN_SYSTEM_PROMPT.
     // Cloud is only ever called as a delegate the local model explicitly requests.
@@ -1674,106 +2382,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Inject a fresh list of installed apps into the system prompt so the
-      // model only picks real package names for OPEN_APP.
-      const apps = await getInstalledApps();
-      const systemPrompt = buildArinSystemPrompt(formatInstalledApps(apps));
-      const localResponse = await sendChatCompletion(settings.localAiHost, settings.selectedModel, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: text },
-      ]);
+      // With the preloaded model (prompt baked on the server) only the user
+      // message is sent. Without it, fall back to the full system prompt.
+      const outgoingMessages = settings.preloadedModel
+        ? [{ role: 'user' as const, content: text }]
+        : [
+            { role: 'system' as const, content: ARIN_SYSTEM_PROMPT },
+            { role: 'user' as const, content: text },
+          ];
+      const localResponse = await sendChatCompletion(
+        settings.localAiHost,
+        settings.preloadedModel ?? settings.selectedModel,
+        outgoingMessages
+      );
 
       const rawText = localResponse.choices?.[0]?.message?.content ?? '';
       const directive = parseAiDirective(rawText);
 
-      // Build the pipeline dynamically from the directive contents:
-      // request -> local -> [cloud] -> [arduino] -> [device] -> response -> done
-      const path: ExecutionStage[] = ['request_sent', 'local_processing'];
-      if (directive.action === 'cloud') {
-        path.push('cloud_processing');
-      }
-      if (directive.action === 'arduino') {
-        path.push('arduino_executing');
-      }
-      if (directive.action === 'device') {
-        path.push('device_executing');
-      }
-      path.push('response_received', 'done');
-      setPipelinePath(path);
-      setCurrentStage(
-        directive.action === 'cloud'
-          ? 'cloud_processing'
-          : directive.action === 'arduino'
-          ? 'arduino_executing'
-          : directive.action === 'device'
-          ? 'device_executing'
-          : 'response_received'
-      );
-
-      if (directive.action === 'respond') {
-        await new Promise<void>((resolve) => setTimeout(() => resolve(), 250));
-        setTestLogs((prev) => [`[SYS] Local AI responded directly.`, ...prev]);
-        finishWithReply(directive.response);
+      // A top-level "schedule" defers the whole directive to the scheduler.
+      if (directive.schedule) {
+        const fireAt = new Date(directive.schedule);
+        if (isNaN(fireAt.getTime())) {
+          appendError(`[ERR 400] AI returned an unparseable schedule time: "${directive.schedule}".`);
+          return;
+        }
+        await scheduleJob(directive, fireAt.toISOString(), (d) => executeDirectiveNow(d, true));
+        setTestLogs((prev) => [`[SCHED] Job queued for ${fireAt.toLocaleString()}.`, ...prev]);
+        finishWithReply(`Got it — scheduled for ${fireAt.toLocaleString()}.`);
         return;
       }
 
-      if (directive.action === 'arduino') {
-        setTestLogs((prev) => [
-          `[EXEC] Arduino command: ${directive.command}${directive.reason ? ` (${directive.reason})` : ''}`,
-          ...prev,
-        ]);
-        const result = await sendArduinoCommand(directive.command, settings.arduinoConnected);
-        setCurrentStage('response_received');
-        setTestLogs((prev) => [`[ARDUINO] ${result.message}`, ...prev]);
-        finishWithReply(result.message);
-        return;
-      }
-
-      if (directive.action === 'device') {
-        setTestLogs((prev) => [
-          `[EXEC] Device command: ${directive.command}${directive.target ? ` target="${directive.target}"` : ''}${directive.message ? ` message="${directive.message}"` : ''}${directive.reason ? ` (${directive.reason})` : ''}`,
-          ...prev,
-        ]);
-        const result = await sendDeviceCommand(
-          directive.command,
-          directive.target,
-          directive.message,
-          settings.permissionMode
-        );
-        setCurrentStage('response_received');
-        setTestLogs((prev) => [`[DEVICE] ${result.message}`, ...prev]);
-        finishWithReply(result.message);
-        return;
-      }
-
-      // directive.action === 'cloud'
-      setTestLogs((prev) => [
-        `[SYS] Local AI delegated to cloud: "${directive.prompt}"${directive.reason ? ` (${directive.reason})` : ''}`,
-        ...prev,
-      ]);
-
-      if (!cloudReady) {
-        appendError('[ERR 502] Local AI requested cloud AI, but cloud is not connected. Set it up in SETUP.');
-        return;
-      }
-      if (!settings.selectedCloudModel) {
-        appendError('[ERR 412] Local AI requested cloud AI, but no cloud model is selected.');
-        return;
-      }
-
-      const cloudResponse = await sendCloudChatCompletion(
-        settings.cloudBaseUrl,
-        settings.cloudApiKey,
-        settings.selectedCloudModel,
-        [{ role: 'user', content: directive.prompt }]
-      );
-      const cloudText =
-        cloudResponse.choices?.[0]?.message?.content?.trim() ??
-        '[ERR] Empty response received from cloud AI.';
-
-      setCurrentStage('response_received');
-      setTestLogs((prev) => [`[CLOUD] Responded via "${settings.selectedCloudModel}"`, ...prev]);
-      finishWithReply(cloudText);
+      // No schedule → run it immediately through the shared executor.
+      await executeDirectiveNow(directive);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       appendError(`[ERR 500] ${errMsg}`);
@@ -3080,21 +3720,40 @@ import { spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
 
 const presetCommands = [
-  'arduino-buzzer',
-  'arduino-motor-F',
-  'arduino-motor-B',
-  'local-"HI"',
-  'cloud-"HI"',
-  'error-test',
-  'builtin-torch-on',
-  'builtin-torch-off',
-  'cam-on',
-  'call-1098712',
-  'message-0987654-"hi"',
+  { label: 'Vol 100%', cmd: 'Set volume to 100%' },
+  { label: 'Mute (0%)', cmd: 'Mute phone' },
+  { label: 'Weather Tokyo', cmd: 'What is the weather in Tokyo?' },
+  { label: 'Spotify App Info', cmd: 'Open Spotify app info' },
+  { label: 'Battery %', cmd: 'Check battery level' },
+  { label: 'Wi-Fi On', cmd: 'Turn on wifi' },
+  { label: 'Bluetooth Off', cmd: 'Turn off bluetooth' },
+  { label: 'Open Settings', cmd: 'Open settings' },
+  { label: 'Flash On', cmd: 'Turn on the flash' },
+  { label: 'Flash Off', cmd: 'Turn off the flash' },
+  { label: 'Camera', cmd: 'Open camera' },
+  { label: 'Call 1345', cmd: 'Call 1345' },
+  { label: 'SMS 2343', cmd: 'Message 2343 hi' },
+  { label: 'WhatsApp Jay', cmd: 'Send hi to Jay via whatsapp' },
+  { label: 'Open Spotify', cmd: 'Open Spotify' },
+  { label: 'Move Forward', cmd: 'Move forward' },
+  { label: 'Robot Buzzer', cmd: 'Buzzer ping' },
+];
+
+const commandSyntaxes = [
+  { category: 'Device & Audio', syntax: 'Set volume to 100% | Mute phone | Volume up / down' },
+  { category: 'Weather API', syntax: 'What is the weather in [City]?' },
+  { category: 'App Info Settings', syntax: 'Open [AppName] app info | Open [wifi/bluetooth/nfc/battery/etc] settings' },
+  { category: 'Connectivity', syntax: 'Turn on/off wifi | Turn on/off bluetooth' },
+  { category: 'Hardware & Phone', syntax: 'Turn on/off the flash | Open camera | Check battery level' },
+  { category: 'Calls & SMS', syntax: 'Call [Name/Number] | Message [Number] [Text] | Send [Text] to [Name] via whatsapp' },
+  { category: 'App Launch', syntax: 'Open [AppName]' },
+  { category: 'Arduino Hardware', syntax: 'Move forward/backward | Turn left/right | Stop | LED on/off | Buzzer ping' },
+  { category: 'AI Questions', syntax: 'What is a [definition]? (Local) | What is today\'s [live data]? (Cloud)' },
 ];
 
 export const TestScreen: React.FC = () => {
   const [customCmd, setCustomCmd] = useState('');
+  const [showGuide, setShowGuide] = useState(false);
   const { testLogs, addTestLog, sendMessage, themeColors } = useApp();
 
   const handleRunCommand = (cmd: string) => {
@@ -3106,12 +3765,42 @@ export const TestScreen: React.FC = () => {
 
   return (
     <View style={[styles.container, { backgroundColor: themeColors.background }]}>
-      <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
-        TEST INTERFACE (DEBUG)
-      </Text>
-      <Text style={[typography.bodyMd, styles.subtitle, { color: themeColors.onSurfaceVariant }]}>
-        Raw Command Execution & Payload Inspector
-      </Text>
+      <View style={styles.headerRow}>
+        <View style={styles.headerTitles}>
+          <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
+            TEST INTERFACE (DEBUG)
+          </Text>
+          <Text style={[typography.bodyMd, styles.subtitle, { color: themeColors.onSurfaceVariant }]}>
+            Raw Command Execution & Payload Inspector
+          </Text>
+        </View>
+
+        <TouchableOpacity
+          style={[styles.guideToggleBtn, { backgroundColor: themeColors.surfaceContainerHigh, borderColor: themeColors.outlineVariant }]}
+          onPress={() => setShowGuide((prev) => !prev)}
+        >
+          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+            {showGuide ? 'HIDE SYNTAX' : 'SYNTAX GUIDE'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Command Syntax Guide Reference */}
+      {showGuide && (
+        <View style={[styles.guideBox, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
+          <Text style={[typography.labelCaps, styles.guideTitle, { color: themeColors.primaryContainer }]}>
+            COMMAND SYNTAX REFERENCE
+          </Text>
+          <ScrollView style={styles.guideScroll} nestedScrollEnabled>
+            {commandSyntaxes.map((item) => (
+              <View key={item.category} style={styles.guideRow}>
+                <Text style={[typography.labelCaps, { color: themeColors.secondary }]}>{item.category}:</Text>
+                <Text style={[typography.codeSm, { color: themeColors.onSurface }]}>{item.syntax}</Text>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       {/* Preset Command Chips */}
       <View style={styles.chipContainer}>
@@ -3119,9 +3808,9 @@ export const TestScreen: React.FC = () => {
           PRESET TEST COMMANDS
         </Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipScroll}>
-          {presetCommands.map((cmd) => (
+          {presetCommands.map((item) => (
             <TouchableOpacity
-              key={cmd}
+              key={item.label}
               style={[
                 styles.chip,
                 {
@@ -3129,16 +3818,16 @@ export const TestScreen: React.FC = () => {
                   borderColor: themeColors.outlineVariant,
                 },
               ]}
-              onPress={() => handleRunCommand(cmd)}
+              onPress={() => handleRunCommand(item.cmd)}
               activeOpacity={0.7}
             >
-              <Text style={[typography.codeSm, { color: themeColors.primaryContainer }]}>{cmd}</Text>
+              <Text style={[typography.codeSm, { color: themeColors.primaryContainer }]}>{item.label}</Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
       </View>
 
-      {/* Custom Command Input */}
+      {/* Custom Direct Command Input Box */}
       <View style={styles.inputRow}>
         <TextInput
           style={[
@@ -3201,10 +3890,39 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     padding: spacing.containerMargin,
-    gap: spacing.md,
+    gap: spacing.sm,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  headerTitles: {
+    flex: 1,
   },
   subtitle: {
     marginTop: -spacing.xs,
+  },
+  guideToggleBtn: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.borderRadius.sm,
+    borderWidth: 1,
+  },
+  guideBox: {
+    maxHeight: 140,
+    padding: spacing.sm,
+    borderRadius: spacing.borderRadius.sm,
+    borderWidth: 1,
+  },
+  guideTitle: {
+    marginBottom: spacing.xs,
+  },
+  guideScroll: {
+    flex: 1,
+  },
+  guideRow: {
+    marginBottom: spacing.xs,
   },
   sectionHeader: {
     marginBottom: spacing.xs,
@@ -3265,55 +3983,8 @@ const styles = StyleSheet.create({
 ## `src/services/aiDirective.ts`
 
 ```typescript
-export const ARIN_SYSTEM_PROMPT = `You are ARIN's on-device controller. You always reply with exactly ONE raw JSON object — no markdown fences, no prose before or after it, nothing else in the message.
-
-Schema:
-{
-  "action": "respond" | "cloud" | "arduino" | "device",
-  "response": string,        // required when action="respond"
-  "prompt": string,          // required when action="cloud"
-  "command": string,         // required when action="arduino" or "device"
-  "target": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP
-  "message": string,         // required for device commands SMS, WHATSAPP
-  "reason": string           // optional, one short phrase
-}
-
-AVAILABLE APPS ON THIS DEVICE (label — exact package name):
-{{AVAILABLE_APPS}}
-
-Deciding "respond" vs "cloud":
-Silently ask yourself: "Could the correct answer to this be different depending on what moment in time it is, or does it depend on something happening in the outside world right now?" If yes → action="cloud". If the answer is fixed regardless of when it's asked → action="respond". Judge this from the meaning of the request, not by matching trigger words. You do not have live internet access directly — but action="cloud" IS your mechanism for getting current information. Never say or imply "I don't have internet access" — emit action="cloud" instead.
-
-action="arduino": robot body/hardware only. "command" must be exactly one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.
-
-action="device": the phone itself. "command" must be exactly one of:
-- TORCH_ON, TORCH_OFF — phone flashlight
-- CAMERA_OPEN — open the camera
-- CALL — call "target" (phone number or contact name) — happens directly, no dialer screen
-- SMS — send "message" to "target" as a text — sends directly, no composer screen
-- WHATSAPP — send "message" to "target" via WhatsApp — this ALWAYS opens WhatsApp with the chat pre-filled; the user must tap Send themselves. This is a real limitation, not something you're doing wrong.
-- OPEN_APP — launch the app named in "target"
-
-Rules for device commands:
-- Never put a number or name inside "message" — it goes in "target". "message" must be the user's exact words, nothing added.
-- If the user names a person instead of a number, put the name as "target" exactly as given.
-- If no app is named for a text, assume plain SMS; only use WHATSAPP when the user says "whatsapp" or clearly names it.
-- For OPEN_APP, "target" MUST be copied exactly from the package name in the AVAILABLE APPS list above — never invent, guess, or shorten a package name. Match the user's request to the closest label in the list.
-- If the user asks to open an app that is NOT in the AVAILABLE APPS list, use action="respond" and say plainly that the app isn't installed — do not emit OPEN_APP with a guessed target.
-- Distinguish TORCH (phone's own flashlight) from arduino's LED_ON/LED_OFF (robot's onboard LED).
-
-Never combine actions. Never invent fields. Never wrap the JSON in backticks or code fences. Never add commentary before or after it.
-
-Examples:
-
-"Turn on the flash" → {"action":"device","command":"TORCH_ON"}
-"Call 1345" → {"action":"device","command":"CALL","target":"1345"}
-"Message 2343 hi" → {"action":"device","command":"SMS","target":"2343","message":"hi"}
-"Send hi to Jay via whatsapp" → {"action":"device","command":"WHATSAPP","target":"Jay","message":"hi"}
-"Open Spotify" (Spotify — com.spotify.music is in AVAILABLE APPS) → {"action":"device","command":"OPEN_APP","target":"com.spotify.music"}
-"Open BeReal" (not in AVAILABLE APPS) → {"action":"respond","response":"BeReal isn't installed on this device."}
-"What's today's gold rate?" → {"action":"cloud","prompt":"What is today's gold rate?"}
-"Move forward" → {"action":"arduino","command":"MOVE_FORWARD"}`;
+import { ARIN_SYSTEM_PROMPT } from './promptText';
+export { ARIN_SYSTEM_PROMPT };
 
 /**
  * Default installed-app list injected at {{AVAILABLE_APPS}} until the native
@@ -3355,14 +4026,29 @@ export const DEVICE_COMMANDS = [
   'SMS',
   'WHATSAPP',
   'OPEN_APP',
+  'WIFI_ON',
+  'WIFI_OFF',
+  'BLUETOOTH_ON',
+  'BLUETOOTH_OFF',
+  'OPEN_SETTINGS',
+  'MUTE_SOUND',
+  'UNMUTE_SOUND',
+  'VOLUME_UP',
+  'VOLUME_DOWN',
+  'SET_VOLUME',
+  'GET_BATTERY',
+  'GET_WEATHER',
 ] as const;
 
 export type DeviceCommand = (typeof DEVICE_COMMANDS)[number];
 
-export type AiDirective =
+// A single step inside a pipeline, or the shape of a non-pipeline directive
+// before the optional top-level "schedule" wrapper is applied.
+export type AiStep =
   | { action: 'respond'; response: string; reason?: string }
   | { action: 'cloud'; prompt: string; reason?: string }
   | { action: 'arduino'; command: ArduinoCommand; reason?: string }
+  | { action: 'speak'; message: string; reason?: string }
   | {
       action: 'device';
       command: DeviceCommand;
@@ -3370,6 +4056,79 @@ export type AiDirective =
       message?: string;
       reason?: string;
     };
+
+export type AiDirective =
+  | (AiStep & { schedule?: string })
+  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string };
+
+function asOptString(val: unknown): string | undefined {
+  return typeof val === 'string' ? val : undefined;
+}
+
+/** Validate+coerce a single step object (no schedule, no nested pipeline). */
+function parseStep(obj: Record<string, unknown>): AiStep | null {
+  // Extract response text tolerating common field name variations from small LLMs
+  const responseText =
+    asOptString(obj.response) ??
+    asOptString(obj.text) ??
+    asOptString(obj.answer) ??
+    asOptString(obj.content) ??
+    asOptString(obj.result);
+
+  if (obj.action === 'respond' || (responseText && !obj.action)) {
+    if (responseText && responseText.trim()) {
+      return { action: 'respond', response: responseText.trim(), reason: asOptString(obj.reason) };
+    }
+  }
+  if (obj.action === 'cloud' && typeof obj.prompt === 'string' && obj.prompt.trim()) {
+    return { action: 'cloud', prompt: obj.prompt.trim(), reason: asOptString(obj.reason) };
+  }
+  if (obj.action === 'speak' && typeof obj.message === 'string' && obj.message.trim()) {
+    return { action: 'speak', message: obj.message.trim(), reason: asOptString(obj.reason) };
+  }
+  if (
+    obj.action === 'arduino' &&
+    typeof obj.command === 'string' &&
+    (ARDUINO_COMMANDS as readonly string[]).includes(obj.command)
+  ) {
+    return { action: 'arduino', command: obj.command as ArduinoCommand, reason: asOptString(obj.reason) };
+  }
+  if (
+    obj.action === 'device' &&
+    typeof obj.command === 'string' &&
+    (DEVICE_COMMANDS as readonly string[]).includes(obj.command)
+  ) {
+    return {
+      action: 'device',
+      command: obj.command as DeviceCommand,
+      target: asOptString(obj.target),
+      message: asOptString(obj.message),
+      reason: asOptString(obj.reason),
+    };
+  }
+
+  // Fallback check: if action is missing or non-standard, but a response text exists
+  if (responseText && responseText.trim()) {
+    return { action: 'respond', response: responseText.trim(), reason: asOptString(obj.reason) };
+  }
+
+  return null;
+}
+
+/** Clean up raw text if JSON parsing fails so raw JSON syntax is never shown in chat UI. */
+function sanitizeFallbackText(text: string): string {
+  let cleaned = text.trim();
+  // If text looks like a raw JSON object string, try to extract a user-facing string from it
+  if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+    const match = cleaned.match(/"(?:response|text|answer|message|content|prompt)":\s*"([^"]+)"/i);
+    if (match && match[1]) {
+      return match[1];
+    }
+    // Remove JSON syntax artifacts if unparseable
+    cleaned = cleaned.replace(/^\{|\}$/g, '').replace(/"[^"]+":/g, '').trim();
+  }
+  return cleaned || '[ERR] Empty response from local AI.';
+}
 
 /**
  * Extract and validate the JSON directive from a raw local-AI completion.
@@ -3380,7 +4139,7 @@ export type AiDirective =
 export function parseAiDirective(raw: string): AiDirective {
   const fallback = (text: string): AiDirective => ({
     action: 'respond',
-    response: text.trim() || '[ERR] Empty response from local AI.',
+    response: sanitizeFallbackText(text),
   });
 
   const start = raw.indexOf('{');
@@ -3400,47 +4159,25 @@ export function parseAiDirective(raw: string): AiDirective {
   }
 
   const obj = parsed as Record<string, unknown>;
+  const schedule = asOptString(obj.schedule);
 
-  if (obj.action === 'respond' && typeof obj.response === 'string') {
-    return { action: 'respond', response: obj.response, reason: asOptString(obj.reason) };
+  if (obj.action === 'pipeline' && Array.isArray(obj.steps)) {
+    const steps = (obj.steps as unknown[])
+      .map((s) => (typeof s === 'object' && s !== null ? parseStep(s as Record<string, unknown>) : null))
+      .filter((s): s is AiStep => s !== null);
+    if (steps.length >= 1) {
+      return { action: 'pipeline', steps, schedule, reason: asOptString(obj.reason) };
+    }
+    return fallback(raw);
   }
 
-  if (obj.action === 'cloud' && typeof obj.prompt === 'string' && obj.prompt.trim()) {
-    return { action: 'cloud', prompt: obj.prompt, reason: asOptString(obj.reason) };
+  const step = parseStep(obj);
+  if (step) {
+    return { ...step, schedule } as AiDirective;
   }
 
-  if (
-    obj.action === 'arduino' &&
-    typeof obj.command === 'string' &&
-    (ARDUINO_COMMANDS as readonly string[]).includes(obj.command)
-  ) {
-    return {
-      action: 'arduino',
-      command: obj.command as ArduinoCommand,
-      reason: asOptString(obj.reason),
-    };
-  }
-
-  if (
-    obj.action === 'device' &&
-    typeof obj.command === 'string' &&
-    (DEVICE_COMMANDS as readonly string[]).includes(obj.command)
-  ) {
-    return {
-      action: 'device',
-      command: obj.command as DeviceCommand,
-      target: asOptString(obj.target),
-      message: asOptString(obj.message),
-      reason: asOptString(obj.reason),
-    };
-  }
-
-  // Recognized shape but failed validation — surface as text rather than silently dropping.
+  // Recognized shape but failed validation — surface clean response text rather than raw JSON.
   return fallback(raw);
-}
-
-function asOptString(val: unknown): string | undefined {
-  return typeof val === 'string' ? val : undefined;
 }
 
 ```
@@ -3676,10 +4413,19 @@ export async function sendChatCompletion(
 import { Linking } from 'react-native';
 import { DeviceCommand } from './aiDirective';
 import { arinNative, hasNativeBridge, InstalledAppNative } from './nativeDeviceModule';
+import { fetchWeather } from './weatherService';
 
 export interface DeviceCommandResult {
   success: boolean;
   message: string;
+}
+
+/** RN wraps native rejections as `CODE: message` — keep only the readable part. */
+function nativeErrorText(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const idx = raw.indexOf(': ');
+  const stripped = idx >= 0 ? raw.slice(idx + 2) : raw;
+  return stripped.trim() || fallback;
 }
 
 export interface InstalledApp {
@@ -3688,7 +4434,8 @@ export interface InstalledApp {
 }
 
 /**
- * List apps installed on the phone, fed into the prompt's {{AVAILABLE_APPS}}.
+ * List apps installed on the phone, fed into the prompt's PACKAGES block as
+ * package names only (the model infers an app's identity from its package).
  *
  * Uses the native PackageManager module when available; otherwise returns a
  * small curated placeholder so OPEN_APP still has valid package names.
@@ -3781,7 +4528,7 @@ export async function sendDeviceCommand(
         } catch (err) {
           return {
             success: false,
-            message: `Call failed: ${err instanceof Error ? err.message : String(err)}`,
+            message: nativeErrorText(err, `Failed to call ${target}.`),
           };
         }
       }
@@ -3807,7 +4554,7 @@ export async function sendDeviceCommand(
         } catch (err) {
           return {
             success: false,
-            message: `SMS failed: ${err instanceof Error ? err.message : String(err)}`,
+            message: nativeErrorText(err, `Failed to send SMS to ${target}.`),
           };
         }
       }
@@ -3856,9 +4603,140 @@ export async function sendDeviceCommand(
       return { success: true, message: `Opening app "${target}" (no native module).` };
     }
 
+    case 'WIFI_ON':
+    case 'WIFI_OFF': {
+      const enabled = command === 'WIFI_ON';
+      if (hasNativeBridge && arinNative) {
+        try {
+          const res = await arinNative.setWifi(enabled);
+          return res === 'TOGGLED_DIRECTLY'
+            ? { success: true, message: `Wi-Fi turned ${enabled ? 'on' : 'off'}.` }
+            : { success: true, message: `Opened Wi-Fi settings to switch Wi-Fi ${enabled ? 'on' : 'off'}.` };
+        } catch (err) {
+          return { success: false, message: `Wi-Fi failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Wi-Fi turned ${enabled ? 'on' : 'off'} (no native module).` };
+    }
+
+    case 'BLUETOOTH_ON':
+    case 'BLUETOOTH_OFF': {
+      const enabled = command === 'BLUETOOTH_ON';
+      if (hasNativeBridge && arinNative) {
+        try {
+          const res = await arinNative.setBluetooth(enabled);
+          return res === 'TOGGLED_DIRECTLY'
+            ? { success: true, message: `Bluetooth turned ${enabled ? 'on' : 'off'}.` }
+            : { success: true, message: `Opened Bluetooth settings to switch Bluetooth ${enabled ? 'on' : 'off'}.` };
+        } catch (err) {
+          return { success: false, message: `Bluetooth failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Bluetooth turned ${enabled ? 'on' : 'off'} (no native module).` };
+    }
+
+    case 'OPEN_SETTINGS': {
+      const settingTarget = target || 'settings';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.openSettings(settingTarget);
+          return { success: true, message: `Opened ${settingTarget} settings.` };
+        } catch (err) {
+          return { success: false, message: `Failed to open settings: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Opened ${settingTarget} settings (no native module).` };
+    }
+
+    case 'MUTE_SOUND':
+    case 'UNMUTE_SOUND': {
+      const isMute = command === 'MUTE_SOUND';
+      const mode = isMute ? 'SILENT' : 'NORMAL';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.setRingerMode(mode);
+          return { success: true, message: `Phone sound ${isMute ? 'muted (silent mode)' : 'unmuted (normal mode)'}.` };
+        } catch (err) {
+          return { success: false, message: `Failed to change ringer mode: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Phone sound ${isMute ? 'muted' : 'unmuted'} (no native module).` };
+    }
+
+    case 'VOLUME_UP':
+    case 'VOLUME_DOWN': {
+      const dir = command === 'VOLUME_UP' ? 'UP' : 'DOWN';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.adjustVolume(dir);
+          return { success: true, message: `Volume turned ${dir.toLowerCase()}.` };
+        } catch (err) {
+          return { success: false, message: `Failed to adjust volume: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Volume turned ${dir.toLowerCase()} (no native module).` };
+    }
+
+    case 'SET_VOLUME': {
+      const level = parseInt(target || '50', 10);
+      const clampedPct = isNaN(level) ? 50 : Math.max(0, Math.min(100, level));
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.setVolumePercent(clampedPct);
+          return {
+            success: true,
+            message: clampedPct === 0 ? 'Volume set to 0% (Phone muted).' : `Volume set to ${clampedPct}%.`,
+          };
+        } catch (err) {
+          return { success: false, message: `Failed to set volume: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return {
+        success: true,
+        message: clampedPct === 0 ? 'Volume set to 0% (Phone muted).' : `Volume set to ${clampedPct}% (no native module).`,
+      };
+    }
+
+    case 'GET_WEATHER': {
+      return await fetchWeather(target);
+    }
+
+    case 'GET_BATTERY': {
+      if (hasNativeBridge && arinNative) {
+        try {
+          const info = await arinNative.getBatteryStatus();
+          return {
+            success: true,
+            message: `Battery is at ${info.level}%${info.isCharging ? ' (Charging)' : ''}.`,
+          };
+        } catch (err) {
+          return { success: false, message: `Failed to get battery status: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: 'Battery level is 85% (no native module).' };
+    }
+
     default:
       return { success: false, message: `Unknown device command: ${command}` };
   }
+}
+
+export interface SpeakResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Execute a SPEAK step. For now this has no real TTS — it just returns the
+ * text so the caller can print it into chat as an ARIN message. Swap the
+ * body of this function for a real TTS call (expo-speech / react-native-tts)
+ * later; every call site already treats this as async.
+ */
+export async function speakText(message: string): Promise<SpeakResult> {
+  // TODO(TTS): call a real speech engine here, e.g.:
+  //   import * as Speech from 'expo-speech';
+  //   await Speech.speak(message);
+  return { success: true, message };
 }
 ```
 
@@ -4250,6 +5128,63 @@ export async function fetchModels(rawHost: string): Promise<LocalAiModel[]> {
 }
 
 /**
+ * Custom Ollama model created by ARIN with the system prompt (prompt.txt) baked
+ * in as the Modelfile SYSTEM block. Chat requests to this model carry only the
+ * user message — the prompt is stored once, server-side.
+ */
+export const ARIN_MODEL_NAME = 'arin';
+
+/**
+ * Create (or re-create) the ARIN preloaded model on the Ollama server.
+ *
+ * The prompt is baked into the model via `POST /api/create` with a Modelfile —
+ * the exact same request `ollama create` performs. The base model must already
+ * exist locally on the server. Always overwrites, so re-running after editing
+ * prompt.txt refreshes the baked prompt.
+ */
+export async function initArinModel(
+  rawHost: string,
+  baseModel: string,
+  systemPrompt: string,
+  options: { timeoutMs?: number } = {}
+): Promise<void> {
+  const baseUrl = normalizeHost(rawHost);
+  const timeoutMs = options.timeoutMs ?? 300000;
+
+  if (!baseModel.trim()) {
+    throw new Error('No base model selected.');
+  }
+
+  const modelfile = [
+    `FROM ${baseModel.trim()}`,
+    'SYSTEM """',
+    systemPrompt,
+    '"""',
+  ].join('\n');
+
+  const res = await fetchWithTimeout(
+    `${baseUrl}/api/create`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        model: ARIN_MODEL_NAME,
+        modelfile,
+      }),
+    },
+    timeoutMs
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => 'No response body');
+    throw new Error(`Model init HTTP ${res.status}: ${errBody}`);
+  }
+}
+
+/**
  * Send a chat completion request. Tries OpenAI-compatible /v1/chat/completions,
  * falls back to Ollama native /api/chat on 404/405.
  */
@@ -4264,7 +5199,7 @@ export async function sendChatCompletion(
   } = {}
 ): Promise<ChatCompletionResponse> {
   const baseUrl = normalizeHost(rawHost);
-  const timeoutMs = options.timeoutMs ?? 30000;
+  const timeoutMs = options.timeoutMs ?? 180000;
 
   // Attempt 1: OpenAI-compatible
   try {
@@ -4280,7 +5215,7 @@ export async function sendChatCompletion(
           model,
           messages,
           temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 2048,
+          max_tokens: options.maxTokens ?? 512,
           stream: false,
         }),
       },
@@ -4320,7 +5255,7 @@ export async function sendChatCompletion(
         stream: false,
         options: {
           temperature: options.temperature ?? 0.7,
-          num_predict: options.maxTokens ?? 2048,
+          num_predict: options.maxTokens ?? 512,
         },
       }),
     },
@@ -4366,13 +5301,26 @@ export interface InstalledAppNative {
   packageName: string;
 }
 
+export interface BatteryStatusNative {
+  level: number;
+  isCharging: boolean;
+}
+
 interface ArinNativeBridge {
   setTorch(enabled: boolean): Promise<boolean>;
   openCamera(): Promise<boolean>;
   callPhone(number: string): Promise<boolean>;
   sendSms(number: string, message: string): Promise<boolean>;
   getInstalledApps(): Promise<InstalledAppNative[]>;
+  getContactNames(): Promise<string[]>;
   launchApp(packageName: string): Promise<boolean>;
+  setWifi(enabled: boolean): Promise<string>;
+  setBluetooth(enabled: boolean): Promise<string>;
+  openSettings(target: string): Promise<boolean>;
+  setRingerMode(mode: string): Promise<boolean>;
+  adjustVolume(direction: string): Promise<boolean>;
+  setVolumePercent(percent: number): Promise<number>;
+  getBatteryStatus(): Promise<BatteryStatusNative>;
 }
 
 /**
@@ -4386,6 +5334,299 @@ export const arinNative: ArinNativeBridge | null =
   Platform.OS === 'android' ? ((NativeModules.ArinNative as ArinNativeBridge) ?? null) : null;
 
 export const hasNativeBridge = arinNative != null;
+```
+
+---
+
+## `src/services/pipelineExecutor.ts`
+
+```typescript
+import { AiStep, ArduinoCommand, DeviceCommand } from './aiDirective';
+import { sendArduinoCommand } from './arduinoService';
+import { sendDeviceCommand, speakText } from './deviceService';
+import { sendChatCompletion as sendCloudChatCompletion } from './cloudAiService';
+import { AppSettings } from '../types';
+
+export interface StepLogEntry {
+  step: AiStep;
+  success: boolean;
+  message: string;
+}
+
+export interface PipelineResult {
+  logs: StepLogEntry[];
+  finalText: string;
+  stoppedEarly: boolean;
+}
+
+/**
+ * Run a list of steps strictly in order. Stops at the first failed step and
+ * reports how far it got. Cloud steps require cloudReady/settings to already
+ * be validated by the caller (same as the existing single-action cloud path).
+ */
+export async function runPipeline(
+  steps: AiStep[],
+  settings: AppSettings,
+  onStepLog: (line: string) => void
+): Promise<PipelineResult> {
+  const logs: StepLogEntry[] = [];
+
+  for (const step of steps) {
+    let success = true;
+    let message = '';
+
+    try {
+      if (step.action === 'respond') {
+        message = step.response;
+      } else if (step.action === 'speak') {
+        const r = await speakText(step.message);
+        success = r.success;
+        message = r.message;
+      } else if (step.action === 'arduino') {
+        const r = await sendArduinoCommand(step.command as ArduinoCommand, settings.arduinoConnected);
+        success = r.success;
+        message = r.message;
+      } else if (step.action === 'device') {
+        const r = await sendDeviceCommand(
+          step.command as DeviceCommand,
+          step.target,
+          step.message,
+          settings.permissionMode
+        );
+        success = r.success;
+        message = r.message;
+      } else if (step.action === 'cloud') {
+        if (!settings.cloudEnabled || settings.cloudStatus !== 'connected' || !settings.selectedCloudModel) {
+          success = false;
+          message = 'Pipeline step requested cloud AI, but cloud is not connected/configured.';
+        } else {
+          const cloudResponse = await sendCloudChatCompletion(
+            settings.cloudBaseUrl,
+            settings.cloudApiKey,
+            settings.selectedCloudModel,
+            [{ role: 'user', content: step.prompt }]
+          );
+          message = cloudResponse.choices?.[0]?.message?.content?.trim() ?? '[ERR] Empty cloud response.';
+        }
+      } else {
+        success = false;
+        message = `Unknown step action.`;
+      }
+    } catch (err) {
+      success = false;
+      message = err instanceof Error ? err.message : String(err);
+    }
+
+    logs.push({ step, success, message });
+    onStepLog(`[PIPE] ${step.action.toUpperCase()}: ${message}`);
+
+    if (!success) {
+      return {
+        logs,
+        finalText: `Pipeline stopped at step "${step.action}": ${message}`,
+        stoppedEarly: true,
+      };
+    }
+  }
+
+  const finalText = logs.map((l) => l.message).filter(Boolean).join('\n');
+  return { logs, finalText, stoppedEarly: false };
+}
+```
+
+---
+
+## `src/services/promptText.ts`
+
+```typescript
+// Auto-generated from prompt.txt — DO NOT EDIT DIRECTLY.
+// Edit prompt.txt at project root and run 'node scripts/sync-prompt.js'.
+
+export const ARIN_SYSTEM_PROMPT = "You are ARIN's on-device controller. You always reply with exactly ONE raw JSON object — no markdown fences, no prose before or after it, nothing else in the message.\n\nSchema:\n{\n  \"action\": \"respond\" | \"cloud\" | \"arduino\" | \"device\",\n  \"response\": string,        // required when action=\"respond\"\n  \"prompt\": string,          // required when action=\"cloud\"\n  \"command\": string,         // required when action=\"arduino\" or \"device\"\n  \"target\": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP, OPEN_SETTINGS, SET_VOLUME, GET_WEATHER\n  \"message\": string,         // required for device commands SMS, WHATSAPP\n  \"reason\": string           // optional, one short phrase\n}\n\nDeciding \"respond\" vs \"cloud\" vs \"device\" vs \"arduino\":\n\n1. action=\"respond\": General knowledge, definitions, explanations, answers, greetings (e.g. \"Hi\", \"What is a box?\", \"What is a tumbler?\", \"How does a car work?\"). Provide the answer in \"response\".\n\n2. action=\"cloud\": ONLY for real-time live news/stocks that changes moment-to-moment in the outside world right now (e.g. \"What's today's gold rate?\", \"Live stock price\").\n\n3. action=\"arduino\": Robot body/hardware movement or signals only. \"command\" must be one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.\n\n4. action=\"device\": Phone actions & built-in Android features/settings. \"command\" must be one of:\n- TORCH_ON, TORCH_OFF — phone flashlight (NOT robot LED)\n- CAMERA_OPEN — open camera\n- CALL — call \"target\" (phone number or contact name)\n- SMS — send \"message\" to \"target\" text\n- WHATSAPP — send \"message\" to \"target\" via WhatsApp\n- OPEN_APP — launch app named in \"target\"\n- WIFI_ON, WIFI_OFF — turn Wi-Fi on or off\n- BLUETOOTH_ON, BLUETOOTH_OFF — turn Bluetooth on or off\n- OPEN_SETTINGS — open Android system settings screen specified in \"target\" (e.g. target=\"wifi\", \"bluetooth\", \"hotspot\", \"nfc\", \"airplane\", \"location\", \"display\", \"brightness\", \"battery\", \"developer\", \"sound\", \"storage\", \"settings\", or \"AppName app info\" to open app info page for an app like \"Spotify app info\")\n- MUTE_SOUND, UNMUTE_SOUND — mute/silent phone sound or unmute\n- VOLUME_UP, VOLUME_DOWN — raise or lower volume\n- SET_VOLUME — set volume to percentage 0 to 100 in \"target\" (e.g. target=\"100\", target=\"50\", target=\"0\" for mute)\n- GET_BATTERY — check battery percentage & charging status\n- GET_WEATHER — fetch live weather for city in \"target\" (e.g. target=\"London\", target=\"Tokyo\")\n\nRules:\n- Never use device/arduino actions for general questions (e.g., \"what is a tumbler?\" -> action=\"respond\").\n- For SET_VOLUME, put number 0 to 100 in \"target\" (e.g. \"100\", \"0\", \"50\").\n- For OPEN_SETTINGS app info, put app name with \"app info\" in \"target\" (e.g. \"Spotify app info\").\n- For GET_WEATHER, put city name in \"target\" (e.g. \"Tokyo\").\n- Never put a number or name inside \"message\" — it goes in \"target\".\n- Never combine actions. Never invent fields. Never wrap JSON in markdown fences.\n\nExamples:\n\n\"Hi\" → {\"action\":\"respond\",\"response\":\"Hello! How can I help you today?\"}\n\"What is a box?\" → {\"action\":\"respond\",\"response\":\"A box is a container with flat sides, typically square or rectangular.\"}\n\"Turn on the flash\" → {\"action\":\"device\",\"command\":\"TORCH_ON\"}\n\"Turn on wifi\" → {\"action\":\"device\",\"command\":\"WIFI_ON\"}\n\"Turn off bluetooth\" → {\"action\":\"device\",\"command\":\"BLUETOOTH_OFF\"}\n\"Set volume to 100%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"100\"}\n\"Set volume to 0%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"0\"}\n\"Mute phone\" → {\"action\":\"device\",\"command\":\"MUTE_SOUND\"}\n\"Open Spotify app info\" → {\"action\":\"device\",\"command\":\"OPEN_SETTINGS\",\"target\":\"Spotify app info\"}\n\"What's the weather in Tokyo?\" → {\"action\":\"device\",\"command\":\"GET_WEATHER\",\"target\":\"Tokyo\"}\n\"Check battery level\" → {\"action\":\"device\",\"command\":\"GET_BATTERY\"}\n\"Call 1345\" → {\"action\":\"device\",\"command\":\"CALL\",\"target\":\"1345\"}\n\"Message 2343 hi\" → {\"action\":\"device\",\"command\":\"SMS\",\"target\":\"2343\",\"message\":\"hi\"}\n\"Open Spotify\" → {\"action\":\"device\",\"command\":\"OPEN_APP\",\"target\":\"Spotify\"}\n\"What's today's gold rate?\" → {\"action\":\"cloud\",\"prompt\":\"What is today's gold rate?\"}\n\"Move forward\" → {\"action\":\"arduino\",\"command\":\"MOVE_FORWARD\"}\n";
+
+```
+
+---
+
+## `src/services/schedulerService.ts`
+
+```typescript
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AiDirective } from './aiDirective';
+
+const SCHEDULED_JOBS_KEY = '@arin_scheduled_jobs';
+
+export interface ScheduledJob {
+  id: string;
+  fireAtIso: string;
+  directive: AiDirective;
+  createdAtIso: string;
+}
+
+const timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+async function readJobs(): Promise<ScheduledJob[]> {
+  try {
+    const raw = await AsyncStorage.getItem(SCHEDULED_JOBS_KEY);
+    return raw ? (JSON.parse(raw) as ScheduledJob[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeJobs(jobs: ScheduledJob[]): Promise<void> {
+  await AsyncStorage.setItem(SCHEDULED_JOBS_KEY, JSON.stringify(jobs));
+}
+
+/**
+ * Persist a job and arm an in-memory timer for it. If fireAtIso is already in
+ * the past (e.g. clock skew, or the user said "in 5 seconds"), it fires almost
+ * immediately rather than being dropped.
+ */
+export async function scheduleJob(
+  directive: AiDirective,
+  fireAtIso: string,
+  onFire: (directive: AiDirective) => void
+): Promise<ScheduledJob> {
+  const job: ScheduledJob = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    fireAtIso,
+    directive,
+    createdAtIso: new Date().toISOString(),
+  };
+  const jobs = await readJobs();
+  jobs.push(job);
+  await writeJobs(jobs);
+  armTimer(job, onFire);
+  return job;
+}
+
+function armTimer(job: ScheduledJob, onFire: (directive: AiDirective) => void) {
+  const delayMs = Math.max(0, new Date(job.fireAtIso).getTime() - Date.now());
+  const handle = setTimeout(async () => {
+    timers.delete(job.id);
+    await removeJob(job.id);
+    onFire(job.directive);
+  }, delayMs);
+  timers.set(job.id, handle);
+}
+
+async function removeJob(id: string): Promise<void> {
+  const jobs = await readJobs();
+  await writeJobs(jobs.filter((j) => j.id !== id));
+}
+
+/**
+ * Call once at app startup (e.g. in AppProvider's mount effect). Re-arms any
+ * jobs that are still in the future, and immediately fires any that were due
+ * while the app was closed.
+ */
+export async function rearmPersistedJobs(onFire: (directive: AiDirective) => void): Promise<void> {
+  const jobs = await readJobs();
+  for (const job of jobs) {
+    if (new Date(job.fireAtIso).getTime() <= Date.now()) {
+      await removeJob(job.id);
+      onFire(job.directive);
+    } else {
+      armTimer(job, onFire);
+    }
+  }
+}
+
+export async function listPendingJobs(): Promise<ScheduledJob[]> {
+  return readJobs();
+}
+
+export async function cancelJob(id: string): Promise<void> {
+  const handle = timers.get(id);
+  if (handle) {
+    clearTimeout(handle);
+    timers.delete(id);
+  }
+  await removeJob(id);
+}
+
+```
+
+---
+
+## `src/services/weatherService.ts`
+
+```typescript
+export interface WeatherResult {
+  success: boolean;
+  message: string;
+}
+
+const WEATHER_CODES: Record<number, string> = {
+  0: 'Clear sky',
+  1: 'Mainly clear',
+  2: 'Partly cloudy',
+  3: 'Overcast',
+  45: 'Foggy',
+  48: 'Depositing rime fog',
+  51: 'Light drizzle',
+  53: 'Moderate drizzle',
+  55: 'Dense drizzle',
+  61: 'Slight rain',
+  63: 'Moderate rain',
+  65: 'Heavy rain',
+  71: 'Slight snow',
+  73: 'Moderate snow',
+  75: 'Heavy snow',
+  80: 'Rain showers',
+  81: 'Moderate rain showers',
+  82: 'Violent rain showers',
+  95: 'Thunderstorm',
+  96: 'Thunderstorm with slight hail',
+  99: 'Thunderstorm with heavy hail',
+};
+
+export async function fetchWeather(city?: string): Promise<WeatherResult> {
+  const targetCity = city?.trim() || 'London';
+  try {
+    // Step 1: Free Geocoding API via Open-Meteo
+    const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(targetCity)}&count=1&language=en&format=json`;
+    const geoRes = await fetch(geoUrl);
+    if (!geoRes.ok) {
+      return { success: false, message: `Failed to find location: ${targetCity}` };
+    }
+    const geoData = await geoRes.json();
+    if (!geoData?.results || geoData.results.length === 0) {
+      return { success: false, message: `Location "${targetCity}" not found.` };
+    }
+
+    const { name, country, latitude, longitude } = geoData.results[0];
+
+    // Step 2: Current Weather Forecast API via Open-Meteo
+    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m`;
+    const weatherRes = await fetch(weatherUrl);
+    if (!weatherRes.ok) {
+      return { success: false, message: `Failed to fetch weather data for ${name}.` };
+    }
+    const weatherData = await weatherRes.json();
+    const current = weatherData?.current;
+    if (!current) {
+      return { success: false, message: `No current weather data available for ${name}.` };
+    }
+
+    const temp = Math.round(current.temperature_2m ?? 0);
+    const humidity = current.relative_humidity_2m ?? 0;
+    const wind = Math.round(current.wind_speed_10m ?? 0);
+    const code = current.weather_code ?? 0;
+    const condition = WEATHER_CODES[code] || 'Cloudy';
+
+    const locationLabel = country ? `${name}, ${country}` : name;
+    return {
+      success: true,
+      message: `Weather in ${locationLabel}: ${temp}°C, ${condition}, Humidity: ${humidity}%, Wind: ${wind} km/h.`,
+    };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return { success: false, message: `Weather request failed: ${errorMsg}` };
+  }
+}
+
 ```
 
 ---
@@ -4563,6 +5804,8 @@ export type ExecutionStage =
   | 'cloud_processing'
   | 'arduino_executing'
   | 'device_executing'
+  | 'speaking'
+  | 'pipeline_executing'
   | 'response_received'
   | 'done'
   | 'error';
@@ -4590,6 +5833,8 @@ export interface AppSettings {
   arduinoConnected: boolean;
   arduinoStatus: ConnectionState;
   permissionMode: 'full_control' | 'compatible';
+  /** Name of the preloaded Ollama model (prompt baked in) — empty when not initialized. */
+  preloadedModel: string | null;
 }
 
 ```

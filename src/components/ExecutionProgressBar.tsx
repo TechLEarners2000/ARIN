@@ -12,6 +12,8 @@ const stageLabels: Record<ExecutionStage, string> = {
   cloud_processing: 'Cloud AI',
   arduino_executing: 'Arduino',
   device_executing: 'Device',
+  speaking: 'Speaking',
+  pipeline_executing: 'Pipeline',
   response_received: 'Response',
   done: 'Done',
   error: 'Error',

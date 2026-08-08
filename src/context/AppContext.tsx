@@ -1,15 +1,19 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { buildArinSystemPrompt, parseAiDirective } from '../services/aiDirective';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
 import { sendArduinoCommand } from '../services/arduinoService';
-import { formatInstalledApps, getInstalledApps, sendDeviceCommand } from '../services/deviceService';
+import { sendDeviceCommand, speakText } from '../services/deviceService';
+import { runPipeline } from '../services/pipelineExecutor';
+import { rearmPersistedJobs, scheduleJob } from '../services/schedulerService';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
   testConnection as testCloudConnection,
 } from '../services/cloudAiService';
 import {
+  ARIN_MODEL_NAME,
   fetchModels as fetchModelsService,
+  initArinModel,
   sendChatCompletion,
   testConnection,
 } from '../services/localAiService';
@@ -63,6 +67,7 @@ const initialSettings: AppSettings = {
   arduinoConnected: false,
   arduinoStatus: 'disconnected',
   permissionMode: 'compatible',
+  preloadedModel: null,
 };
 
 const initialMessages: ChatMessageItem[] = [
@@ -128,6 +133,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     loadSavedState();
   }, []);
 
+  useEffect(() => {
+    rearmPersistedJobs((directive) => {
+      executeDirectiveNow(directive, /* fromScheduler */ true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Preload (init) the ARIN model once per host+model per connection epoch:
+  // bake the system prompt into an Ollama custom model so subsequent chat
+  // requests only carry the user's short message. A failed attempt is retried
+  // on the next successful connection (epoch bump in connectLocalAi).
+  const initAttemptedKeyRef = useRef<string>('');
+  const connectionEpochRef = useRef(0);
+
+  useEffect(() => {
+    const ready =
+      settings.localAiEnabled &&
+      settings.localAiStatus === 'connected' &&
+      !!settings.selectedModel;
+    if (!ready) return;
+
+    const key = `${connectionEpochRef.current}|${settings.localAiHost}|${settings.selectedModel}`;
+    if (initAttemptedKeyRef.current === key) return;
+    initAttemptedKeyRef.current = key;
+
+    let cancelled = false;
+    setTestLogs((prev) => [
+      `[INIT] Baking system prompt into "${ARIN_MODEL_NAME}" (from "${settings.selectedModel}")...`,
+      ...prev,
+    ]);
+
+    (async () => {
+      try {
+        await initArinModel(settings.localAiHost, settings.selectedModel, ARIN_SYSTEM_PROMPT);
+        if (cancelled) return;
+        updateSettings({
+          preloadedModel: ARIN_MODEL_NAME,
+          localAiModels: settings.localAiModels.includes(ARIN_MODEL_NAME)
+            ? settings.localAiModels
+            : [...settings.localAiModels, ARIN_MODEL_NAME],
+        });
+        setTestLogs((prev) => [
+          `[INIT] "${ARIN_MODEL_NAME}" ready — only short user messages will be sent.`,
+          ...prev,
+        ]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (Date.now() + 1).toString(),
+            sender: 'ARIN',
+            text: `ARIN system prompt initialized into the local model. Stop words like "hi" or "call 987" are now enough — the full rules stay with the model.`,
+            timestamp: new Date().toLocaleTimeString(),
+          },
+        ]);
+      } catch (error: unknown) {
+        if (cancelled) return;
+        const errMsg = error instanceof Error ? error.message : String(error);
+        setTestLogs((prev) => [
+          `[INIT] Failed: ${errMsg} — falling back to sending the prompt per request.`,
+          ...prev,
+        ]);
+        updateSettings({ preloadedModel: null });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    settings.localAiEnabled,
+    settings.localAiStatus,
+    settings.localAiHost,
+    settings.selectedModel,
+    settings.localAiModels,
+  ]);
+
   const finishSplash = () => {
     setIsSplashVisible(false);
   };
@@ -188,6 +269,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTestLogs((prev) => [`[CONN] Failed: ${result.message}`, ...prev]);
       return false;
     }
+
+    connectionEpochRef.current += 1;
 
     const modelIds = result.models
       ? result.models.map((m) => m.id)
@@ -308,6 +391,133 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTimeout(() => setCurrentStage('idle'), 1500);
   };
 
+  /**
+   * Shared executor for a single directive, used by both the immediate
+   * sendMessage path and the scheduler-fired path. Handles pipelines, and the
+   * respond/speak/arduino/device/cloud branches.
+   */
+  const executeDirectiveNow = async (directive: AiDirective, fromScheduler = false) => {
+    if (fromScheduler) {
+      setIsProcessing(true);
+      setStageErrorMsg(null);
+    }
+
+    // Build the visual pipeline dynamically from the directive contents.
+    const path: ExecutionStage[] = ['request_sent', 'local_processing'];
+    if (directive.action === 'cloud') {
+      path.push('cloud_processing');
+    }
+    if (directive.action === 'arduino') {
+      path.push('arduino_executing');
+    }
+    if (directive.action === 'device') {
+      path.push('device_executing');
+    }
+    if (directive.action === 'speak') {
+      path.push('speaking');
+    }
+    if (directive.action === 'pipeline') {
+      path.push('pipeline_executing');
+    }
+    path.push('response_received', 'done');
+    setPipelinePath(path);
+    setCurrentStage(
+      directive.action === 'cloud'
+        ? 'cloud_processing'
+        : directive.action === 'arduino'
+        ? 'arduino_executing'
+        : directive.action === 'device'
+        ? 'device_executing'
+        : directive.action === 'speak'
+        ? 'speaking'
+        : directive.action === 'pipeline'
+        ? 'pipeline_executing'
+        : 'response_received'
+    );
+
+    if (directive.action === 'pipeline') {
+      setTestLogs((prev) => [
+        `[EXEC] Pipeline: ${directive.steps.length} step(s)${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await runPipeline(directive.steps, settings, (line) =>
+        setTestLogs((prev) => [line, ...prev])
+      );
+      finishWithReply(result.finalText || (result.stoppedEarly ? 'Pipeline stopped.' : 'Pipeline complete.'));
+      return;
+    }
+
+    if (directive.action === 'respond') {
+      await new Promise<void>((resolve) => setTimeout(() => resolve(), 250));
+      setTestLogs((prev) => [`[SYS] Local AI responded directly.`, ...prev]);
+      finishWithReply(directive.response);
+      return;
+    }
+
+    if (directive.action === 'speak') {
+      const r = await speakText(directive.message);
+      setTestLogs((prev) => [`[SPEAK] ${r.message}`, ...prev]);
+      finishWithReply(r.message);
+      return;
+    }
+
+    if (directive.action === 'arduino') {
+      setTestLogs((prev) => [
+        `[EXEC] Arduino command: ${directive.command}${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await sendArduinoCommand(directive.command, settings.arduinoConnected);
+      setCurrentStage('response_received');
+      setTestLogs((prev) => [`[ARDUINO] ${result.message}`, ...prev]);
+      finishWithReply(result.message);
+      return;
+    }
+
+    if (directive.action === 'device') {
+      setTestLogs((prev) => [
+        `[EXEC] Device command: ${directive.command}${directive.target ? ` target="${directive.target}"` : ''}${directive.message ? ` message="${directive.message}"` : ''}${directive.reason ? ` (${directive.reason})` : ''}`,
+        ...prev,
+      ]);
+      const result = await sendDeviceCommand(
+        directive.command,
+        directive.target,
+        directive.message,
+        settings.permissionMode
+      );
+      setCurrentStage('response_received');
+      setTestLogs((prev) => [`[DEVICE] ${result.message}`, ...prev]);
+      finishWithReply(result.message);
+      return;
+    }
+
+    // directive.action === 'cloud'
+    setTestLogs((prev) => [
+      `[SYS] Local AI delegated to cloud: "${directive.prompt}"${directive.reason ? ` (${directive.reason})` : ''}`,
+      ...prev,
+    ]);
+    const cloudReady = settings.cloudEnabled && settings.cloudStatus === 'connected';
+    if (!cloudReady) {
+      appendError('[ERR 502] Local AI requested cloud AI, but cloud is not connected. Set it up in SETUP.');
+      return;
+    }
+    if (!settings.selectedCloudModel) {
+      appendError('[ERR 412] Local AI requested cloud AI, but no cloud model is selected.');
+      return;
+    }
+    const cloudResponse = await sendCloudChatCompletion(
+      settings.cloudBaseUrl,
+      settings.cloudApiKey,
+      settings.selectedCloudModel,
+      [{ role: 'user', content: directive.prompt }]
+    );
+    const cloudText =
+      cloudResponse.choices?.[0]?.message?.content?.trim() ??
+      '[ERR] Empty response received from cloud AI.';
+    setCurrentStage('response_received');
+    setTestLogs((prev) => [`[CLOUD] Responded via "${settings.selectedCloudModel}"`, ...prev]);
+    finishWithReply(cloudText);
+  };
+
   const sendMessage = async (text: string) => {
     const userMsg: ChatMessageItem = {
       id: Date.now().toString(),
@@ -327,7 +537,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentStage('local_processing');
 
     const localReady = settings.localAiEnabled && settings.localAiStatus === 'connected';
-    const cloudReady = settings.cloudEnabled && settings.cloudStatus === 'connected';
 
     // Local AI is primary and drives all routing decisions via ARIN_SYSTEM_PROMPT.
     // Cloud is only ever called as a delegate the local model explicitly requests.
@@ -345,106 +554,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Inject a fresh list of installed apps into the system prompt so the
-      // model only picks real package names for OPEN_APP.
-      const apps = await getInstalledApps();
-      const systemPrompt = buildArinSystemPrompt(formatInstalledApps(apps));
-      const localResponse = await sendChatCompletion(settings.localAiHost, settings.selectedModel, [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: text },
-      ]);
+      // With the preloaded model (prompt baked on the server) only the user
+      // message is sent. Without it, fall back to the full system prompt.
+      const outgoingMessages = settings.preloadedModel
+        ? [{ role: 'user' as const, content: text }]
+        : [
+            { role: 'system' as const, content: ARIN_SYSTEM_PROMPT },
+            { role: 'user' as const, content: text },
+          ];
+      const localResponse = await sendChatCompletion(
+        settings.localAiHost,
+        settings.preloadedModel ?? settings.selectedModel,
+        outgoingMessages
+      );
 
       const rawText = localResponse.choices?.[0]?.message?.content ?? '';
       const directive = parseAiDirective(rawText);
 
-      // Build the pipeline dynamically from the directive contents:
-      // request -> local -> [cloud] -> [arduino] -> [device] -> response -> done
-      const path: ExecutionStage[] = ['request_sent', 'local_processing'];
-      if (directive.action === 'cloud') {
-        path.push('cloud_processing');
-      }
-      if (directive.action === 'arduino') {
-        path.push('arduino_executing');
-      }
-      if (directive.action === 'device') {
-        path.push('device_executing');
-      }
-      path.push('response_received', 'done');
-      setPipelinePath(path);
-      setCurrentStage(
-        directive.action === 'cloud'
-          ? 'cloud_processing'
-          : directive.action === 'arduino'
-          ? 'arduino_executing'
-          : directive.action === 'device'
-          ? 'device_executing'
-          : 'response_received'
-      );
-
-      if (directive.action === 'respond') {
-        await new Promise<void>((resolve) => setTimeout(() => resolve(), 250));
-        setTestLogs((prev) => [`[SYS] Local AI responded directly.`, ...prev]);
-        finishWithReply(directive.response);
+      // A top-level "schedule" defers the whole directive to the scheduler.
+      if (directive.schedule) {
+        const fireAt = new Date(directive.schedule);
+        if (isNaN(fireAt.getTime())) {
+          appendError(`[ERR 400] AI returned an unparseable schedule time: "${directive.schedule}".`);
+          return;
+        }
+        await scheduleJob(directive, fireAt.toISOString(), (d) => executeDirectiveNow(d, true));
+        setTestLogs((prev) => [`[SCHED] Job queued for ${fireAt.toLocaleString()}.`, ...prev]);
+        finishWithReply(`Got it — scheduled for ${fireAt.toLocaleString()}.`);
         return;
       }
 
-      if (directive.action === 'arduino') {
-        setTestLogs((prev) => [
-          `[EXEC] Arduino command: ${directive.command}${directive.reason ? ` (${directive.reason})` : ''}`,
-          ...prev,
-        ]);
-        const result = await sendArduinoCommand(directive.command, settings.arduinoConnected);
-        setCurrentStage('response_received');
-        setTestLogs((prev) => [`[ARDUINO] ${result.message}`, ...prev]);
-        finishWithReply(result.message);
-        return;
-      }
-
-      if (directive.action === 'device') {
-        setTestLogs((prev) => [
-          `[EXEC] Device command: ${directive.command}${directive.target ? ` target="${directive.target}"` : ''}${directive.message ? ` message="${directive.message}"` : ''}${directive.reason ? ` (${directive.reason})` : ''}`,
-          ...prev,
-        ]);
-        const result = await sendDeviceCommand(
-          directive.command,
-          directive.target,
-          directive.message,
-          settings.permissionMode
-        );
-        setCurrentStage('response_received');
-        setTestLogs((prev) => [`[DEVICE] ${result.message}`, ...prev]);
-        finishWithReply(result.message);
-        return;
-      }
-
-      // directive.action === 'cloud'
-      setTestLogs((prev) => [
-        `[SYS] Local AI delegated to cloud: "${directive.prompt}"${directive.reason ? ` (${directive.reason})` : ''}`,
-        ...prev,
-      ]);
-
-      if (!cloudReady) {
-        appendError('[ERR 502] Local AI requested cloud AI, but cloud is not connected. Set it up in SETUP.');
-        return;
-      }
-      if (!settings.selectedCloudModel) {
-        appendError('[ERR 412] Local AI requested cloud AI, but no cloud model is selected.');
-        return;
-      }
-
-      const cloudResponse = await sendCloudChatCompletion(
-        settings.cloudBaseUrl,
-        settings.cloudApiKey,
-        settings.selectedCloudModel,
-        [{ role: 'user', content: directive.prompt }]
-      );
-      const cloudText =
-        cloudResponse.choices?.[0]?.message?.content?.trim() ??
-        '[ERR] Empty response received from cloud AI.';
-
-      setCurrentStage('response_received');
-      setTestLogs((prev) => [`[CLOUD] Responded via "${settings.selectedCloudModel}"`, ...prev]);
-      finishWithReply(cloudText);
+      // No schedule → run it immediately through the shared executor.
+      await executeDirectiveNow(directive);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       appendError(`[ERR 500] ${errMsg}`);

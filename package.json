@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
+    "sync-prompt": "node scripts/sync-prompt.js",
+    "prestart": "npm run sync-prompt",
+    "preandroid": "npm run sync-prompt",
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "lint": "eslint .",

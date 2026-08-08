@@ -1,52 +1,5 @@
-export const ARIN_SYSTEM_PROMPT = `You are ARIN's on-device controller. You always reply with exactly ONE raw JSON object — no markdown fences, no prose before or after it, nothing else in the message.
-
-Schema:
-{
-  "action": "respond" | "cloud" | "arduino" | "device",
-  "response": string,        // required when action="respond"
-  "prompt": string,          // required when action="cloud"
-  "command": string,         // required when action="arduino" or "device"
-  "target": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP
-  "message": string,         // required for device commands SMS, WHATSAPP
-  "reason": string           // optional, one short phrase
-}
-
-AVAILABLE APPS ON THIS DEVICE (label — exact package name):
-{{AVAILABLE_APPS}}
-
-Deciding "respond" vs "cloud":
-Silently ask yourself: "Could the correct answer to this be different depending on what moment in time it is, or does it depend on something happening in the outside world right now?" If yes → action="cloud". If the answer is fixed regardless of when it's asked → action="respond". Judge this from the meaning of the request, not by matching trigger words. You do not have live internet access directly — but action="cloud" IS your mechanism for getting current information. Never say or imply "I don't have internet access" — emit action="cloud" instead.
-
-action="arduino": robot body/hardware only. "command" must be exactly one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.
-
-action="device": the phone itself. "command" must be exactly one of:
-- TORCH_ON, TORCH_OFF — phone flashlight
-- CAMERA_OPEN — open the camera
-- CALL — call "target" (phone number or contact name) — happens directly, no dialer screen
-- SMS — send "message" to "target" as a text — sends directly, no composer screen
-- WHATSAPP — send "message" to "target" via WhatsApp — this ALWAYS opens WhatsApp with the chat pre-filled; the user must tap Send themselves. This is a real limitation, not something you're doing wrong.
-- OPEN_APP — launch the app named in "target"
-
-Rules for device commands:
-- Never put a number or name inside "message" — it goes in "target". "message" must be the user's exact words, nothing added.
-- If the user names a person instead of a number, put the name as "target" exactly as given.
-- If no app is named for a text, assume plain SMS; only use WHATSAPP when the user says "whatsapp" or clearly names it.
-- For OPEN_APP, "target" MUST be copied exactly from the package name in the AVAILABLE APPS list above — never invent, guess, or shorten a package name. Match the user's request to the closest label in the list.
-- If the user asks to open an app that is NOT in the AVAILABLE APPS list, use action="respond" and say plainly that the app isn't installed — do not emit OPEN_APP with a guessed target.
-- Distinguish TORCH (phone's own flashlight) from arduino's LED_ON/LED_OFF (robot's onboard LED).
-
-Never combine actions. Never invent fields. Never wrap the JSON in backticks or code fences. Never add commentary before or after it.
-
-Examples:
-
-"Turn on the flash" → {"action":"device","command":"TORCH_ON"}
-"Call 1345" → {"action":"device","command":"CALL","target":"1345"}
-"Message 2343 hi" → {"action":"device","command":"SMS","target":"2343","message":"hi"}
-"Send hi to Jay via whatsapp" → {"action":"device","command":"WHATSAPP","target":"Jay","message":"hi"}
-"Open Spotify" (Spotify — com.spotify.music is in AVAILABLE APPS) → {"action":"device","command":"OPEN_APP","target":"com.spotify.music"}
-"Open BeReal" (not in AVAILABLE APPS) → {"action":"respond","response":"BeReal isn't installed on this device."}
-"What's today's gold rate?" → {"action":"cloud","prompt":"What is today's gold rate?"}
-"Move forward" → {"action":"arduino","command":"MOVE_FORWARD"}`;
+import { ARIN_SYSTEM_PROMPT } from './promptText';
+export { ARIN_SYSTEM_PROMPT };
 
 /**
  * Default installed-app list injected at {{AVAILABLE_APPS}} until the native
@@ -88,14 +41,29 @@ export const DEVICE_COMMANDS = [
   'SMS',
   'WHATSAPP',
   'OPEN_APP',
+  'WIFI_ON',
+  'WIFI_OFF',
+  'BLUETOOTH_ON',
+  'BLUETOOTH_OFF',
+  'OPEN_SETTINGS',
+  'MUTE_SOUND',
+  'UNMUTE_SOUND',
+  'VOLUME_UP',
+  'VOLUME_DOWN',
+  'SET_VOLUME',
+  'GET_BATTERY',
+  'GET_WEATHER',
 ] as const;
 
 export type DeviceCommand = (typeof DEVICE_COMMANDS)[number];
 
-export type AiDirective =
+// A single step inside a pipeline, or the shape of a non-pipeline directive
+// before the optional top-level "schedule" wrapper is applied.
+export type AiStep =
   | { action: 'respond'; response: string; reason?: string }
   | { action: 'cloud'; prompt: string; reason?: string }
   | { action: 'arduino'; command: ArduinoCommand; reason?: string }
+  | { action: 'speak'; message: string; reason?: string }
   | {
       action: 'device';
       command: DeviceCommand;
@@ -103,6 +71,106 @@ export type AiDirective =
       message?: string;
       reason?: string;
     };
+
+export type AiDirective =
+  | (AiStep & { schedule?: string })
+  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string };
+
+function asOptString(val: unknown): string | undefined {
+  return typeof val === 'string' ? val : undefined;
+}
+
+function normalizeArduinoCommand(raw: string): ArduinoCommand | null {
+  const norm = raw.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if ((ARDUINO_COMMANDS as readonly string[]).includes(norm)) {
+    return norm as ArduinoCommand;
+  }
+  if (norm.includes('FORWARD') || norm === 'FWD') return 'MOVE_FORWARD';
+  if (norm.includes('BACK') || norm === 'REV' || norm === 'REVERSE') return 'MOVE_BACKWARD';
+  if (norm.includes('LEFT')) return 'TURN_LEFT';
+  if (norm.includes('RIGHT')) return 'TURN_RIGHT';
+  if (norm.includes('STOP') || norm === 'HALT' || norm === 'BRAKE') return 'STOP';
+  if (norm.includes('LED_ON') || norm === 'LIGHT_ON') return 'LED_ON';
+  if (norm.includes('LED_OFF') || norm === 'LIGHT_OFF') return 'LED_OFF';
+  if (norm.includes('BUZZER') || norm.includes('BEEP') || norm === 'PING') return 'BUZZER_PING';
+  return null;
+}
+
+/** Validate+coerce a single step object (no schedule, no nested pipeline). */
+function parseStep(obj: Record<string, unknown>): AiStep | null {
+  // Extract response text tolerating common field name variations from small LLMs
+  const responseText =
+    asOptString(obj.response) ??
+    asOptString(obj.text) ??
+    asOptString(obj.answer) ??
+    asOptString(obj.content) ??
+    asOptString(obj.result);
+
+  if (obj.action === 'respond' || (responseText && !obj.action)) {
+    if (responseText && responseText.trim()) {
+      return { action: 'respond', response: responseText.trim(), reason: asOptString(obj.reason) };
+    }
+  }
+  if (obj.action === 'cloud' && typeof obj.prompt === 'string' && obj.prompt.trim()) {
+    return { action: 'cloud', prompt: obj.prompt.trim(), reason: asOptString(obj.reason) };
+  }
+  if (obj.action === 'speak' && typeof obj.message === 'string' && obj.message.trim()) {
+    return { action: 'speak', message: obj.message.trim(), reason: asOptString(obj.reason) };
+  }
+
+  const rawCmd = asOptString(obj.command);
+  if (obj.action === 'arduino' || obj.action === 'robot' || (!obj.action && rawCmd)) {
+    const arduinoCmd = rawCmd ? normalizeArduinoCommand(rawCmd) : null;
+    if (arduinoCmd) {
+      return { action: 'arduino', command: arduinoCmd, reason: asOptString(obj.reason) };
+    }
+  }
+
+  if (
+    obj.action === 'device' &&
+    typeof obj.command === 'string' &&
+    (DEVICE_COMMANDS as readonly string[]).includes(obj.command)
+  ) {
+    return {
+      action: 'device',
+      command: obj.command as DeviceCommand,
+      target: asOptString(obj.target),
+      message: asOptString(obj.message),
+      reason: asOptString(obj.reason),
+    };
+  }
+
+  // Fallback check: if action is missing or non-standard, but a response text exists
+  if (responseText && responseText.trim()) {
+    return { action: 'respond', response: responseText.trim(), reason: asOptString(obj.reason) };
+  }
+
+  return null;
+}
+
+/** Clean up raw text if JSON parsing fails so raw JSON syntax is never shown in chat UI. */
+function sanitizeFallbackText(text: string): string {
+  let cleaned = text.trim();
+  // If text looks like a raw JSON object string, try to extract a user-facing string from it
+  if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+    const responseMatch = cleaned.match(/"(?:response|text|answer|message|content|prompt)":\s*"([^"]+)"/i);
+    if (responseMatch && responseMatch[1]) {
+      return responseMatch[1];
+    }
+    const cmdMatch = cleaned.match(/"command":\s*"([^"]+)"/i);
+    if (cmdMatch && cmdMatch[1]) {
+      return `Executing robot command: ${cmdMatch[1].toUpperCase()}`;
+    }
+    // Clean JSON syntax artifacts if unparseable
+    cleaned = cleaned
+      .replace(/[{}"']/g, '')
+      .replace(/action\s*:\s*/gi, '')
+      .replace(/command\s*:\s*/gi, '')
+      .replace(/reason\s*:\s*/gi, '')
+      .trim();
+  }
+  return cleaned || '[ERR] Empty response from local AI.';
+}
 
 /**
  * Extract and validate the JSON directive from a raw local-AI completion.
@@ -113,7 +181,7 @@ export type AiDirective =
 export function parseAiDirective(raw: string): AiDirective {
   const fallback = (text: string): AiDirective => ({
     action: 'respond',
-    response: text.trim() || '[ERR] Empty response from local AI.',
+    response: sanitizeFallbackText(text),
   });
 
   const start = raw.indexOf('{');
@@ -133,45 +201,23 @@ export function parseAiDirective(raw: string): AiDirective {
   }
 
   const obj = parsed as Record<string, unknown>;
+  const schedule = asOptString(obj.schedule);
 
-  if (obj.action === 'respond' && typeof obj.response === 'string') {
-    return { action: 'respond', response: obj.response, reason: asOptString(obj.reason) };
+  if (obj.action === 'pipeline' && Array.isArray(obj.steps)) {
+    const steps = (obj.steps as unknown[])
+      .map((s) => (typeof s === 'object' && s !== null ? parseStep(s as Record<string, unknown>) : null))
+      .filter((s): s is AiStep => s !== null);
+    if (steps.length >= 1) {
+      return { action: 'pipeline', steps, schedule, reason: asOptString(obj.reason) };
+    }
+    return fallback(raw);
   }
 
-  if (obj.action === 'cloud' && typeof obj.prompt === 'string' && obj.prompt.trim()) {
-    return { action: 'cloud', prompt: obj.prompt, reason: asOptString(obj.reason) };
+  const step = parseStep(obj);
+  if (step) {
+    return { ...step, schedule } as AiDirective;
   }
 
-  if (
-    obj.action === 'arduino' &&
-    typeof obj.command === 'string' &&
-    (ARDUINO_COMMANDS as readonly string[]).includes(obj.command)
-  ) {
-    return {
-      action: 'arduino',
-      command: obj.command as ArduinoCommand,
-      reason: asOptString(obj.reason),
-    };
-  }
-
-  if (
-    obj.action === 'device' &&
-    typeof obj.command === 'string' &&
-    (DEVICE_COMMANDS as readonly string[]).includes(obj.command)
-  ) {
-    return {
-      action: 'device',
-      command: obj.command as DeviceCommand,
-      target: asOptString(obj.target),
-      message: asOptString(obj.message),
-      reason: asOptString(obj.reason),
-    };
-  }
-
-  // Recognized shape but failed validation — surface as text rather than silently dropping.
+  // Recognized shape but failed validation — surface clean response text rather than raw JSON.
   return fallback(raw);
-}
-
-function asOptString(val: unknown): string | undefined {
-  return typeof val === 'string' ? val : undefined;
 }

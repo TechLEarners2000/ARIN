@@ -381,6 +381,63 @@ export async function fetchModels(rawHost: string): Promise<LocalAiModel[]> {
 }
 
 /**
+ * Custom Ollama model created by ARIN with the system prompt (prompt.txt) baked
+ * in as the Modelfile SYSTEM block. Chat requests to this model carry only the
+ * user message — the prompt is stored once, server-side.
+ */
+export const ARIN_MODEL_NAME = 'arin';
+
+/**
+ * Create (or re-create) the ARIN preloaded model on the Ollama server.
+ *
+ * The prompt is baked into the model via `POST /api/create` with a Modelfile —
+ * the exact same request `ollama create` performs. The base model must already
+ * exist locally on the server. Always overwrites, so re-running after editing
+ * prompt.txt refreshes the baked prompt.
+ */
+export async function initArinModel(
+  rawHost: string,
+  baseModel: string,
+  systemPrompt: string,
+  options: { timeoutMs?: number } = {}
+): Promise<void> {
+  const baseUrl = normalizeHost(rawHost);
+  const timeoutMs = options.timeoutMs ?? 300000;
+
+  if (!baseModel.trim()) {
+    throw new Error('No base model selected.');
+  }
+
+  const modelfile = [
+    `FROM ${baseModel.trim()}`,
+    'SYSTEM """',
+    systemPrompt,
+    '"""',
+  ].join('\n');
+
+  const res = await fetchWithTimeout(
+    `${baseUrl}/api/create`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        model: ARIN_MODEL_NAME,
+        modelfile,
+      }),
+    },
+    timeoutMs
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => 'No response body');
+    throw new Error(`Model init HTTP ${res.status}: ${errBody}`);
+  }
+}
+
+/**
  * Send a chat completion request. Tries OpenAI-compatible /v1/chat/completions,
  * falls back to Ollama native /api/chat on 404/405.
  */
@@ -395,7 +452,7 @@ export async function sendChatCompletion(
   } = {}
 ): Promise<ChatCompletionResponse> {
   const baseUrl = normalizeHost(rawHost);
-  const timeoutMs = options.timeoutMs ?? 30000;
+  const timeoutMs = options.timeoutMs ?? 180000;
 
   // Attempt 1: OpenAI-compatible
   try {
@@ -411,7 +468,7 @@ export async function sendChatCompletion(
           model,
           messages,
           temperature: options.temperature ?? 0.7,
-          max_tokens: options.maxTokens ?? 2048,
+          max_tokens: options.maxTokens ?? 512,
           stream: false,
         }),
       },
@@ -451,7 +508,7 @@ export async function sendChatCompletion(
         stream: false,
         options: {
           temperature: options.temperature ?? 0.7,
-          num_predict: options.maxTokens ?? 2048,
+          num_predict: options.maxTokens ?? 512,
         },
       }),
     },

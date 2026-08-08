@@ -11,6 +11,8 @@ export type ExecutionStage =
   | 'cloud_processing'
   | 'arduino_executing'
   | 'device_executing'
+  | 'speaking'
+  | 'pipeline_executing'
   | 'response_received'
   | 'done'
   | 'error';
@@ -38,4 +40,6 @@ export interface AppSettings {
   arduinoConnected: boolean;
   arduinoStatus: ConnectionState;
   permissionMode: 'full_control' | 'compatible';
+  /** Name of the preloaded Ollama model (prompt baked in) — empty when not initialized. */
+  preloadedModel: string | null;
 }

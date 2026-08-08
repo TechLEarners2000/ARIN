@@ -1,6 +1,7 @@
 import { Linking } from 'react-native';
 import { DeviceCommand } from './aiDirective';
 import { arinNative, hasNativeBridge, InstalledAppNative } from './nativeDeviceModule';
+import { fetchWeather } from './weatherService';
 
 export interface DeviceCommandResult {
   success: boolean;
@@ -21,7 +22,8 @@ export interface InstalledApp {
 }
 
 /**
- * List apps installed on the phone, fed into the prompt's {{AVAILABLE_APPS}}.
+ * List apps installed on the phone, fed into the prompt's PACKAGES block as
+ * package names only (the model infers an app's identity from its package).
  *
  * Uses the native PackageManager module when available; otherwise returns a
  * small curated placeholder so OPEN_APP still has valid package names.
@@ -189,7 +191,138 @@ export async function sendDeviceCommand(
       return { success: true, message: `Opening app "${target}" (no native module).` };
     }
 
+    case 'WIFI_ON':
+    case 'WIFI_OFF': {
+      const enabled = command === 'WIFI_ON';
+      if (hasNativeBridge && arinNative) {
+        try {
+          const res = await arinNative.setWifi(enabled);
+          return res === 'TOGGLED_DIRECTLY'
+            ? { success: true, message: `Wi-Fi turned ${enabled ? 'on' : 'off'}.` }
+            : { success: true, message: `Opened Wi-Fi settings to switch Wi-Fi ${enabled ? 'on' : 'off'}.` };
+        } catch (err) {
+          return { success: false, message: `Wi-Fi failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Wi-Fi turned ${enabled ? 'on' : 'off'} (no native module).` };
+    }
+
+    case 'BLUETOOTH_ON':
+    case 'BLUETOOTH_OFF': {
+      const enabled = command === 'BLUETOOTH_ON';
+      if (hasNativeBridge && arinNative) {
+        try {
+          const res = await arinNative.setBluetooth(enabled);
+          return res === 'TOGGLED_DIRECTLY'
+            ? { success: true, message: `Bluetooth turned ${enabled ? 'on' : 'off'}.` }
+            : { success: true, message: `Opened Bluetooth settings to switch Bluetooth ${enabled ? 'on' : 'off'}.` };
+        } catch (err) {
+          return { success: false, message: `Bluetooth failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Bluetooth turned ${enabled ? 'on' : 'off'} (no native module).` };
+    }
+
+    case 'OPEN_SETTINGS': {
+      const settingTarget = target || 'settings';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.openSettings(settingTarget);
+          return { success: true, message: `Opened ${settingTarget} settings.` };
+        } catch (err) {
+          return { success: false, message: `Failed to open settings: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Opened ${settingTarget} settings (no native module).` };
+    }
+
+    case 'MUTE_SOUND':
+    case 'UNMUTE_SOUND': {
+      const isMute = command === 'MUTE_SOUND';
+      const mode = isMute ? 'SILENT' : 'NORMAL';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.setRingerMode(mode);
+          return { success: true, message: `Phone sound ${isMute ? 'muted (silent mode)' : 'unmuted (normal mode)'}.` };
+        } catch (err) {
+          return { success: false, message: `Failed to change ringer mode: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Phone sound ${isMute ? 'muted' : 'unmuted'} (no native module).` };
+    }
+
+    case 'VOLUME_UP':
+    case 'VOLUME_DOWN': {
+      const dir = command === 'VOLUME_UP' ? 'UP' : 'DOWN';
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.adjustVolume(dir);
+          return { success: true, message: `Volume turned ${dir.toLowerCase()}.` };
+        } catch (err) {
+          return { success: false, message: `Failed to adjust volume: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: `Volume turned ${dir.toLowerCase()} (no native module).` };
+    }
+
+    case 'SET_VOLUME': {
+      const level = parseInt(target || '50', 10);
+      const clampedPct = isNaN(level) ? 50 : Math.max(0, Math.min(100, level));
+      if (hasNativeBridge && arinNative) {
+        try {
+          await arinNative.setVolumePercent(clampedPct);
+          return {
+            success: true,
+            message: clampedPct === 0 ? 'Volume set to 0% (Phone muted).' : `Volume set to ${clampedPct}%.`,
+          };
+        } catch (err) {
+          return { success: false, message: `Failed to set volume: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return {
+        success: true,
+        message: clampedPct === 0 ? 'Volume set to 0% (Phone muted).' : `Volume set to ${clampedPct}% (no native module).`,
+      };
+    }
+
+    case 'GET_WEATHER': {
+      return await fetchWeather(target);
+    }
+
+    case 'GET_BATTERY': {
+      if (hasNativeBridge && arinNative) {
+        try {
+          const info = await arinNative.getBatteryStatus();
+          return {
+            success: true,
+            message: `Battery is at ${info.level}%${info.isCharging ? ' (Charging)' : ''}.`,
+          };
+        } catch (err) {
+          return { success: false, message: `Failed to get battery status: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return { success: true, message: 'Battery level is 85% (no native module).' };
+    }
+
     default:
       return { success: false, message: `Unknown device command: ${command}` };
   }
+}
+
+export interface SpeakResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Execute a SPEAK step. For now this has no real TTS — it just returns the
+ * text so the caller can print it into chat as an ARIN message. Swap the
+ * body of this function for a real TTS call (expo-speech / react-native-tts)
+ * later; every call site already treats this as async.
+ */
+export async function speakText(message: string): Promise<SpeakResult> {
+  // TODO(TTS): call a real speech engine here, e.g.:
+  //   import * as Speech from 'expo-speech';
+  //   await Speech.speak(message);
+  return { success: true, message };
 }
