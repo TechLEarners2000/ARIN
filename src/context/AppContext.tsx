@@ -1,10 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
-import { sendArduinoCommand } from '../services/arduinoService';
-import { sendDeviceCommand, speakText } from '../services/deviceService';
+import { sendArduinoCommand, onSerialConnect, onSerialDisconnect, queryRobotBuzzerStatus } from '../services/arduinoService';
+import { sendDeviceCommand, speakText, stopSpeech } from '../services/deviceService';
 import { runPipeline } from '../services/pipelineExecutor';
 import { rearmPersistedJobs, scheduleJob } from '../services/schedulerService';
+import { saveRule } from '../services/ruleStorage';
+import { startRuleEngineMonitors, stopRuleEngineMonitors } from '../services/triggerMonitors';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
@@ -49,6 +51,8 @@ interface AppContextType {
   addTestLog: (command: string) => void;
   refreshModels: () => Promise<void>;
   refreshCloudModels: () => Promise<void>;
+  isSpeaking: boolean;
+  stopAudio: () => Promise<void>;
 }
 
 const initialSettings: AppSettings = {
@@ -68,6 +72,8 @@ const initialSettings: AppSettings = {
   arduinoStatus: 'disconnected',
   permissionMode: 'compatible',
   preloadedModel: null,
+  ttsAutoSpeak: true,
+  ttsVoiceGender: 'female',
 };
 
 const initialMessages: ChatMessageItem[] = [
@@ -104,6 +110,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [stageErrorMsg, setStageErrorMsg] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [testLogs, setTestLogs] = useState<string[]>([]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const stopAudio = async () => {
+    await stopSpeech();
+    setIsSpeaking(false);
+  };
 
   useEffect(() => {
     const loadSavedState = async () => {
@@ -137,8 +149,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     rearmPersistedJobs((directive) => {
       executeDirectiveNow(directive, /* fromScheduler */ true);
     });
+    startRuleEngineMonitors({
+      isArduinoConnected: settings.arduinoConnected,
+      onLog: (msg) => setTestLogs((prev) => [msg, ...prev]),
+    });
+    return () => {
+      stopRuleEngineMonitors();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.arduinoConnected]);
+
+  // USB-OTG serial lifecycle — auto-detect Arduino on plug-in
+  useEffect(() => {
+    const unsubConnect = onSerialConnect((info) => {
+      setSettings((prev) => ({
+        ...prev,
+        arduinoConnected: true,
+        arduinoStatus: 'connected',
+      }));
+      setTestLogs((prev) => [`[USB] Arduino connected: ${info.name}`, ...prev]);
+    });
+
+    const unsubDisconnect = onSerialDisconnect((info) => {
+      setSettings((prev) => ({
+        ...prev,
+        arduinoConnected: false,
+        arduinoStatus: 'disconnected',
+      }));
+      setTestLogs((prev) => [`[USB] Arduino disconnected: ${info.reason || info.error || 'unknown'}`, ...prev]);
+    });
+
+    return () => {
+      unsubConnect();
+      unsubDisconnect();
+    };
   }, []);
+
+  // Heartbeat — verify Arduino is alive every 5s while connected
+  useEffect(() => {
+    if (!settings.arduinoConnected) return;
+    const interval = setInterval(async () => {
+      try {
+        await queryRobotBuzzerStatus(true);
+      } catch {
+        // If heartbeat fails, the serial read thread will emit SerialDisconnect
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [settings.arduinoConnected]);
+
+  // Auto-reconnect — poll for USB device every 3s for 30s after disconnect
+  useEffect(() => {
+    if (settings.arduinoConnected) return;
+    const { arinNative } = require('../services/nativeDeviceModule');
+    if (!arinNative) return;
+    let attempts = 0;
+    const maxAttempts = 10;
+    const interval = setInterval(async () => {
+      attempts++;
+      if (attempts > maxAttempts) {
+        clearInterval(interval);
+        return;
+      }
+      try {
+        const devices = await arinNative.listUsbDevices();
+        if (devices.length > 0) {
+          const d = devices[0];
+          await arinNative.connectUsbSerial(d.vendorId, d.productId);
+          clearInterval(interval);
+        }
+      } catch {
+        // retry
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [settings.arduinoConnected]);
 
   // Preload (init) the ARIN model once per host+model per connection epoch:
   // bake the system prompt into an Ollama custom model so subsequent chat
@@ -388,6 +473,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setMessages((prev) => [...prev, aiReply]);
     setIsProcessing(false);
+
+    if (settings.ttsAutoSpeak) {
+      setIsSpeaking(true);
+      speakText(aiText, settings.ttsVoiceGender).finally(() => {
+        setIsSpeaking(false);
+      });
+    }
+
     setTimeout(() => setCurrentStage('idle'), 1500);
   };
 
@@ -444,6 +537,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setTestLogs((prev) => [line, ...prev])
       );
       finishWithReply(result.finalText || (result.stoppedEarly ? 'Pipeline stopped.' : 'Pipeline complete.'));
+      return;
+    }
+
+    if (directive.action === 'create_rule') {
+      const ruleData = directive.rule || {};
+      const newRule = {
+        id: `rule_${Date.now()}`,
+        name: ruleData.name || 'AI Automation Rule',
+        trigger: ruleData.trigger || { type: 'manual' },
+        actions: ruleData.actions || [{ type: 'notification', title: 'ARIN Rule', body: 'Triggered' }],
+        enabled: true,
+        lastTriggeredAt: null,
+        cooldownMs: 60000,
+      } as any;
+
+      await saveRule(newRule);
+      setTestLogs((prev) => [`[RULE] AI created automation rule: "${newRule.name}"`, ...prev]);
+      finishWithReply(directive.response || `Created automation rule: "${newRule.name}".`);
       return;
     }
 
@@ -649,6 +760,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addTestLog,
         refreshModels,
         refreshCloudModels,
+        isSpeaking,
+        stopAudio,
       }}
     >
       {children}

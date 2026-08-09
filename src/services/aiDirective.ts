@@ -1,3 +1,4 @@
+import { Rule } from '../types';
 import { ARIN_SYSTEM_PROMPT } from './promptText';
 export { ARIN_SYSTEM_PROMPT };
 
@@ -74,7 +75,8 @@ export type AiStep =
 
 export type AiDirective =
   | (AiStep & { schedule?: string })
-  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string };
+  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string }
+  | { action: 'create_rule'; rule: Partial<Rule>; response: string; schedule?: string; reason?: string };
 
 function asOptString(val: unknown): string | undefined {
   return typeof val === 'string' ? val : undefined;
@@ -202,6 +204,17 @@ export function parseAiDirective(raw: string): AiDirective {
 
   const obj = parsed as Record<string, unknown>;
   const schedule = asOptString(obj.schedule);
+
+  if (obj.action === 'create_rule' && typeof obj.rule === 'object' && obj.rule !== null) {
+    const response = asOptString(obj.response) || 'Created automation rule.';
+    return {
+      action: 'create_rule',
+      rule: obj.rule as Partial<Rule>,
+      response,
+      schedule,
+      reason: asOptString(obj.reason),
+    };
+  }
 
   if (obj.action === 'pipeline' && Array.isArray(obj.steps)) {
     const steps = (obj.steps as unknown[])

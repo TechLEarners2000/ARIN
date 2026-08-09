@@ -7,15 +7,24 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.media.AudioManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Bundle
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.Voice
 import android.telephony.SmsManager
+import java.util.Locale
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -23,6 +32,10 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
+import com.hoho.android.usbserial.driver.CommonUsbSerialPort
+import com.hoho.android.usbserial.driver.UsbSerialProber
+import android.os.Handler
+import android.os.Looper
 
 class ArinNativeModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
@@ -405,6 +418,231 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  // ---------------- Local Notifications ----------------
+
+  @ReactMethod
+  fun showNotification(title: String, body: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val notificationManager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+      val channelId = "arin_automation_channel"
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = android.app.NotificationChannel(
+          channelId,
+          "ARIN Automations",
+          android.app.NotificationManager.IMPORTANCE_DEFAULT
+        )
+        notificationManager.createNotificationChannel(channel)
+      }
+      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        android.app.Notification.Builder(ctx, channelId)
+      } else {
+        @Suppress("DEPRECATION")
+        android.app.Notification.Builder(ctx)
+      }
+      builder.setContentTitle(title)
+        .setContentText(body)
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setAutoCancel(true)
+
+      notificationManager.notify((System.currentTimeMillis() % 10000).toInt(), builder.build())
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("NOTIFICATION_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Offline Text-To-Speech (TTS) ----------------
+
+  private var tts: TextToSpeech? = null
+  private var ttsReady = false
+
+  init {
+    initTtsEngine(null)
+  }
+
+  private fun initTtsEngine(onReady: (() -> Unit)?) {
+    tts = TextToSpeech(reactApplicationContext) { status ->
+      if (status == TextToSpeech.SUCCESS) {
+        val result = tts?.setLanguage(Locale.US)
+        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+          tts?.setLanguage(Locale.getDefault())
+        }
+        ttsReady = true
+        onReady?.invoke()
+      } else {
+        android.util.Log.e("ArinNative", "TTS initialization failed with status: $status")
+      }
+    }
+  }
+
+  private fun applyVoiceGender(gender: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+    try {
+      val isMale = gender.lowercase() == "male"
+      val voices = tts?.voices
+      if (!voices.isNullOrEmpty()) {
+        val targetName = if (isMale) "male" else "female"
+        val match = voices.firstOrNull { voice ->
+          !voice.isNetworkConnectionRequired && voice.name.lowercase().contains(targetName)
+        } ?: voices.firstOrNull { voice ->
+          voice.name.lowercase().contains(targetName)
+        }
+        if (match != null) {
+          tts?.voice = match
+        }
+      }
+    } catch (_: Throwable) {
+      // fallback
+    }
+  }
+
+  @ReactMethod
+  fun speak(text: String, gender: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        if (tts == null || !ttsReady) {
+          initTtsEngine {
+            applyVoiceGender(gender)
+            performSpeak(text, promise)
+          }
+        } else {
+          applyVoiceGender(gender)
+          performSpeak(text, promise)
+        }
+      } catch (e: Throwable) {
+        promise.reject("TTS_FAILED", e.message)
+      }
+    }
+  }
+
+  private fun performSpeak(text: String, promise: Promise) {
+    try {
+      val params = Bundle()
+      params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+      val res = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "arin_tts_${System.currentTimeMillis()}")
+      if (res == TextToSpeech.SUCCESS) {
+        promise.resolve(true)
+      } else {
+        android.util.Log.e("ArinNative", "TTS speak failed code: $res")
+        promise.reject("TTS_SPEAK_ERROR", "TTS speak returned code $res")
+      }
+    } catch (e: Throwable) {
+      promise.reject("TTS_SPEAK_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun stopSpeaking(promise: Promise) {
+    try {
+      tts?.stop()
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("TTS_STOP_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Speech-To-Text (STT) ----------------
+  // Prefers on-device offline recognition. Falls back to online if the
+  // device does not have an offline model installed.
+
+  private var speechRecognizer: SpeechRecognizer? = null
+  private var activeSttPromise: Promise? = null
+
+  @ReactMethod
+  fun startListening(promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
+          promise.reject(
+            "STT_UNAVAILABLE",
+            "Speech recognizer not available on this device. Enable microphone permissions."
+          )
+          return@runOnUiQueueThread
+        }
+
+        activeSttPromise?.reject("CANCELLED", "New recognition requested.")
+        activeSttPromise = promise
+
+        if (speechRecognizer == null) {
+          // Prefer offline / on-device recognition when available
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
+            speechRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
+          } else if (SpeechRecognizer.isRecognitionAvailable(ctx)) {
+            // Offline model not installed — fall back to online recognition
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(ctx)
+          } else {
+            promise.reject(
+              "OFFLINE_STT_UNAVAILABLE",
+              "No speech recognition available. Install an offline language pack: " +
+                "Settings → General Management → Language & Input → On-device speech recognition → Download."
+            )
+            return@runOnUiQueueThread
+          }
+        }
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+          override fun onReadyForSpeech(params: Bundle?) {}
+          override fun onBeginningOfSpeech() {}
+          override fun onRmsChanged(rmsdB: Float) {}
+          override fun onBufferReceived(buffer: ByteArray?) {}
+          override fun onEndOfSpeech() {}
+          override fun onError(error: Int) {
+            val msg = when (error) {
+              SpeechRecognizer.ERROR_AUDIO -> "Audio recording error."
+              SpeechRecognizer.ERROR_CLIENT -> "Client error."
+              SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions."
+              SpeechRecognizer.ERROR_NETWORK -> "Network error."
+              SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout."
+              SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized."
+              SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy."
+              SpeechRecognizer.ERROR_SERVER -> "Server error."
+              SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input."
+              else -> "Speech recognition error: $error"
+            }
+            activeSttPromise?.reject("STT_ERROR", msg)
+            activeSttPromise = null
+          }
+
+          override fun onResults(results: Bundle?) {
+            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val text = matches?.firstOrNull() ?: ""
+            activeSttPromise?.resolve(text)
+            activeSttPromise = null
+          }
+
+          override fun onPartialResults(partialResults: Bundle?) {}
+          override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
+          putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+
+        speechRecognizer?.startListening(intent)
+      } catch (e: Throwable) {
+        promise.reject("STT_FAILED", e.message)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun stopListening(promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        speechRecognizer?.stopListening()
+        promise.resolve(true)
+      } catch (e: Throwable) {
+        promise.reject("STT_STOP_FAILED", e.message)
+      }
+    }
+  }
+
   // ---------------- Fuzzy App Resolution ----------------
 
   private data class AppMatch(val label: String, val packageName: String)
@@ -644,5 +882,180 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     'm', 'n' -> '5'
     'r' -> '6'
     else -> '0'
+  }
+
+  // ---------------- USB-OTG Serial (Arduino) ----------------
+
+  private var usbSerialPort: CommonUsbSerialPort? = null
+  private var usbSerialThread: Thread? = null
+  private var usbSerialRunning = false
+  private val usbHandler = Handler(Looper.getMainLooper())
+
+  private val defaultProber = UsbSerialProber.getDefaultProber()
+
+  private fun emitSerialEvent(eventName: String, params: WritableMap?) {
+    reactApplicationContext
+      .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+      .emit(eventName, params)
+  }
+
+  @ReactMethod
+  fun listUsbDevices(promise: Promise) {
+    try {
+      val usbManager = reactApplicationContext.getSystemService(Context.USB_SERVICE) as UsbManager
+      val result = Arguments.createArray()
+      for (device in usbManager.deviceList.values) {
+        val port = defaultProber.probeDevice(device)
+        if (port != null) {
+          val info = Arguments.createMap()
+          info.putString("name", device.productName ?: device.deviceName)
+          info.putString("address", device.deviceName)
+          info.putInt("vendorId", device.vendorId)
+          info.putInt("productId", device.productId)
+          info.putInt("deviceClass", device.deviceClass)
+          result.pushMap(info)
+        }
+      }
+      promise.resolve(result)
+    } catch (e: Throwable) {
+      promise.reject("USB_LIST_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun connectUsbSerial(vendorId: Int, productId: Int, promise: Promise) {
+    try {
+      val ctx = reactApplicationContext
+      val usbManager = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
+
+      // Find the matching device
+      val device = usbManager.deviceList.values.firstOrNull {
+        it.vendorId == vendorId && it.productId == productId
+      }
+      if (device == null) {
+        promise.reject("USB_DEVICE_NOT_FOUND", "USB device not found. Check the cable is connected.")
+        return
+      }
+
+      // Disconnect any existing session
+      disconnectUsbSerialInternal()
+
+      // Probe for the correct driver
+      val driver = defaultProber.probeDevice(device)
+      if (driver == null) {
+        promise.reject("USB_DRIVER_NOT_FOUND", "No compatible driver for this USB device.")
+        return
+      }
+
+      if (driver.ports.isEmpty()) {
+        promise.reject("USB_NO_PORTS", "USB device has no serial ports.")
+        return
+      }
+
+      val port = driver.ports[0] as CommonUsbSerialPort
+
+      // Open and configure
+      val connection = usbManager.openDevice(device)
+      if (connection == null) {
+        promise.reject("USB_PERMISSION_DENIED", "USB permission denied. Check device authorization.")
+        return
+      }
+
+      port.open(connection)
+      port.setParameters(115200, 8, CommonUsbSerialPort.STOPBITS_1, CommonUsbSerialPort.PARITY_NONE)
+
+      usbSerialPort = port
+      usbSerialRunning = true
+
+      // Start background read thread
+      usbSerialThread = Thread({
+        val buf = ByteArray(256)
+        val lineBuf = StringBuilder()
+        while (usbSerialRunning) {
+          try {
+            val len = port.read(buf, 100)
+            if (len > 0) {
+              val chunk = String(buf, 0, len)
+              for (c in chunk) {
+                if (c == '\n' || c == '\r') {
+                  val line = lineBuf.toString().trim()
+                  if (line.isNotEmpty()) {
+                    val event = Arguments.createMap()
+                    event.putString("data", line)
+                    usbHandler.post { emitSerialEvent("SerialData", event) }
+                  }
+                  lineBuf.clear()
+                } else {
+                  lineBuf.append(c)
+                }
+              }
+            }
+          } catch (e: Throwable) {
+            if (usbSerialRunning) {
+              usbSerialRunning = false
+              usbHandler.post {
+                val event = Arguments.createMap()
+                event.putString("error", e.message ?: "Read error")
+                emitSerialEvent("SerialDisconnect", event)
+              }
+            }
+            break
+          }
+        }
+      }, "USB-Serial-Read").also { it.isDaemon = true; it.start() }
+
+      // Emit connected event
+      val event = Arguments.createMap()
+      event.putString("name", device.productName ?: device.deviceName)
+      event.putInt("vendorId", vendorId)
+      event.putInt("productId", productId)
+      usbHandler.post { emitSerialEvent("SerialConnect", event) }
+
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("USB_CONNECT_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun disconnectUsbSerial(promise: Promise) {
+    try {
+      disconnectUsbSerialInternal()
+      val event = Arguments.createMap()
+      event.putString("reason", "user_disconnect")
+      usbHandler.post { emitSerialEvent("SerialDisconnect", event) }
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("USB_DISCONNECT_FAILED", e.message)
+    }
+  }
+
+  private fun disconnectUsbSerialInternal() {
+    usbSerialRunning = false
+    try { usbSerialThread?.interrupt() } catch (_: Throwable) {}
+    usbSerialThread = null
+    try { usbSerialPort?.close() } catch (_: Throwable) {}
+    usbSerialPort = null
+  }
+
+  @ReactMethod
+  fun writeSerial(data: String, promise: Promise) {
+    val port = usbSerialPort
+    if (port == null || !usbSerialRunning) {
+      promise.reject("USB_NOT_CONNECTED", "Arduino not connected.")
+      return
+    }
+    try {
+      val payload = (data.trim() + "\n").toByteArray()
+      port.write(payload, 1000)
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("USB_WRITE_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun isUsbConnected(promise: Promise) {
+    promise.resolve(usbSerialRunning && usbSerialPort != null)
   }
 }

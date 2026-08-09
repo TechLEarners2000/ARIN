@@ -10,6 +10,14 @@ export interface BatteryStatusNative {
   isCharging: boolean;
 }
 
+export interface UsbDeviceInfo {
+  name: string;
+  address: string;
+  vendorId: number;
+  productId: number;
+  deviceClass: number;
+}
+
 interface ArinNativeBridge {
   setTorch(enabled: boolean): Promise<boolean>;
   openCamera(): Promise<boolean>;
@@ -25,6 +33,17 @@ interface ArinNativeBridge {
   adjustVolume(direction: string): Promise<boolean>;
   setVolumePercent(percent: number): Promise<number>;
   getBatteryStatus(): Promise<BatteryStatusNative>;
+  showNotification(title: string, body: string): Promise<boolean>;
+  speak(text: string, gender?: string): Promise<boolean>;
+  stopSpeaking(): Promise<boolean>;
+  startListening(): Promise<string>;
+  stopListening(): Promise<boolean>;
+  // USB-OTG Serial
+  listUsbDevices(): Promise<UsbDeviceInfo[]>;
+  connectUsbSerial(vendorId: number, productId: number): Promise<boolean>;
+  disconnectUsbSerial(): Promise<boolean>;
+  writeSerial(data: string): Promise<boolean>;
+  isUsbConnected(): Promise<boolean>;
 }
 
 /**

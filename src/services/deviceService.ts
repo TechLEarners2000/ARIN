@@ -1,4 +1,4 @@
-import { Linking } from 'react-native';
+import { Linking, PermissionsAndroid, Platform } from 'react-native';
 import { DeviceCommand } from './aiDirective';
 import { arinNative, hasNativeBridge, InstalledAppNative } from './nativeDeviceModule';
 import { fetchWeather } from './weatherService';
@@ -132,12 +132,45 @@ export async function sendDeviceCommand(
       if (!target) {
         return { success: false, message: 'No target specified for SMS.' };
       }
+
+      let outgoingMsg = message ?? '';
+
+      // If message references battery, time, or template tags, resolve live value
+      const lowerMsg = outgoingMsg.toLowerCase();
+      if (
+        lowerMsg.includes('battery') ||
+        lowerMsg.includes('time') ||
+        lowerMsg.includes('status') ||
+        lowerMsg.includes('{{')
+      ) {
+        let batPct = 'Unknown%';
+        if (hasNativeBridge && arinNative) {
+          try {
+            const b = await arinNative.getBatteryStatus();
+            batPct = `${b.level}%`;
+          } catch {
+            // ignore
+          }
+        }
+        const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        if (lowerMsg === 'the battery percentage' || lowerMsg === 'battery percentage' || lowerMsg === 'battery') {
+          outgoingMsg = batPct;
+        } else {
+          outgoingMsg = outgoingMsg
+            .replace(/\{\{\s*(time|date|timestamp|clock)\s*\}\}/gi, nowTime)
+            .replace(/\{\{\s*(status|buzzerStatus|buzzer_status|buzzer|robot_status|robotStatus)\s*\}\}/gi, 'OFF')
+            .replace(/\{\{\s*(battery|battery_level|batteryLevel|bat|level)\s*\}\}/gi, batPct)
+            .replace(/(?:the\s+)?battery\s*(?:percentage|level|pct)?/gi, batPct);
+        }
+      }
+
       if (hasNativeBridge && arinNative) {
         try {
-          await arinNative.sendSms(target, message ?? '');
+          await arinNative.sendSms(target, outgoingMsg);
           return {
             success: true,
-            message: `SMS sent to ${target}${message ? `: "${message}"` : ''}.`,
+            message: `SMS sent to ${target}: "${outgoingMsg}".`,
           };
         } catch (err) {
           return {
@@ -147,9 +180,9 @@ export async function sendDeviceCommand(
         }
       }
       try {
-        const body = encodeURIComponent(message ?? '');
+        const body = encodeURIComponent(outgoingMsg);
         await Linking.openURL(`sms:${encodeURIComponent(target)}?body=${body}`);
-        return { success: true, message: `Prepared SMS to ${target}${message ? `: "${message}"` : ''}.` };
+        return { success: true, message: `Prepared SMS to ${target}: "${outgoingMsg}".` };
       } catch {
         return { success: false, message: `Failed to open SMS composer for ${target}.` };
       }
@@ -315,14 +348,113 @@ export interface SpeakResult {
 }
 
 /**
- * Execute a SPEAK step. For now this has no real TTS — it just returns the
- * text so the caller can print it into chat as an ARIN message. Swap the
- * body of this function for a real TTS call (expo-speech / react-native-tts)
- * later; every call site already treats this as async.
+ * Execute a SPEAK step via native Android offline TextToSpeech engine with Male/Female voice selection.
  */
-export async function speakText(message: string): Promise<SpeakResult> {
-  // TODO(TTS): call a real speech engine here, e.g.:
-  //   import * as Speech from 'expo-speech';
-  //   await Speech.speak(message);
+export async function speakText(
+  message: string,
+  gender: 'female' | 'male' = 'female'
+): Promise<SpeakResult> {
+  if (hasNativeBridge && arinNative) {
+    try {
+      await arinNative.speak(message, gender);
+      return { success: true, message };
+    } catch {
+      return { success: false, message };
+    }
+  }
   return { success: true, message };
+}
+
+/**
+ * Interrupt and stop any active TTS speech output.
+ */
+export async function stopSpeech(): Promise<boolean> {
+  if (hasNativeBridge && arinNative) {
+    try {
+      await arinNative.stopSpeaking();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export interface VoiceInputResult {
+  success: boolean;
+  text: string;
+  error?: string;
+}
+
+/**
+ * Capture voice input natively via Android SpeechRecognizer (supports offline speech models).
+ */
+export async function startVoiceInput(): Promise<VoiceInputResult> {
+  if (Platform.OS === 'android') {
+    try {
+      const hasAudioPerm = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      if (!hasAudioPerm) {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission Required',
+            message: 'ARIN needs microphone access to recognize voice commands offline.',
+            buttonPositive: 'Grant',
+          }
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          return {
+            success: false,
+            text: '',
+            error: 'RECORD_AUDIO permission denied.',
+          };
+        }
+      }
+    } catch (permErr: unknown) {
+      return {
+        success: false,
+        text: '',
+        error: `Permission error: ${permErr instanceof Error ? permErr.message : String(permErr)}`,
+      };
+    }
+  }
+
+  if (hasNativeBridge && arinNative) {
+    try {
+      const transcript = await arinNative.startListening();
+      return { success: true, text: transcript };
+    } catch (err: unknown) {
+      const errStr = err instanceof Error ? err.message : String(err);
+      if (errStr.includes('OFFLINE_STT_UNAVAILABLE')) {
+        return {
+          success: false,
+          text: '',
+          error:
+            'No offline speech model. To enable offline voice input: Settings → General Management → Language & Input → On-device speech recognition → Download.',
+        };
+      }
+      return { success: false, text: '', error: errStr };
+    }
+  }
+
+  return { success: false, text: '', error: 'Native STT module missing.' };
+}
+
+/**
+ * Stop the active voice input session early (mic button pressed again).
+ */
+export async function stopVoiceInput(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  try {
+    const { NativeModules } = require('react-native');
+    const bridge = NativeModules.ArinNative;
+    if (bridge && typeof bridge.stopListening === 'function') {
+      return await bridge.stopListening();
+    }
+  } catch {
+    // ignore
+  }
+  return false;
 }

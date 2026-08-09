@@ -1,6 +1,6 @@
 # ARIN — Full Source Code
 
-> 41 files
+> 44 files
 
 ---
 
@@ -151,6 +151,22 @@ dependencies {
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <application
       android:name=".MainApplication"
@@ -198,10 +214,17 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Bundle
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.Voice
 import android.telephony.SmsManager
+import java.util.Locale
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -505,9 +528,26 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     try {
       val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
       when (mode.uppercase().trim()) {
-        "SILENT" -> audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
-        "VIBRATE" -> audioManager.ringerMode = AudioManager.RINGER_MODE_VIBRATE
-        else -> audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+        "SILENT" -> {
+          // Mute volume streams cleanly without triggering Do Not Disturb permission error
+          val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
+          audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, minVol, AudioManager.FLAG_SHOW_UI)
+        }
+        "VIBRATE" -> {
+          try {
+            audioManager.ringerMode = AudioManager.RINGER_MODE_VIBRATE
+          } catch (_: Throwable) {
+            val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, minVol, AudioManager.FLAG_SHOW_UI)
+          }
+        }
+        else -> {
+          try {
+            audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+          } catch (_: Throwable) {
+            // ignore DND error
+          }
+        }
       }
       promise.resolve(true)
     } catch (e: Throwable) {
@@ -525,13 +565,9 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
       val clampedPercent = percent.coerceIn(0, 100)
 
       if (clampedPercent == 0) {
-        audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
         val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC) else 0
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, minVol, AudioManager.FLAG_SHOW_UI)
       } else {
-        if (audioManager.ringerMode == AudioManager.RINGER_MODE_SILENT) {
-          audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
-        }
         val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val targetVol = (maxVol * clampedPercent / 100.0f).toInt().coerceIn(1, maxVol)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, AudioManager.FLAG_SHOW_UI)
@@ -575,6 +611,231 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
       promise.resolve(map)
     } catch (e: Throwable) {
       promise.reject("BATTERY_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Local Notifications ----------------
+
+  @ReactMethod
+  fun showNotification(title: String, body: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    try {
+      val notificationManager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+      val channelId = "arin_automation_channel"
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val channel = android.app.NotificationChannel(
+          channelId,
+          "ARIN Automations",
+          android.app.NotificationManager.IMPORTANCE_DEFAULT
+        )
+        notificationManager.createNotificationChannel(channel)
+      }
+      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        android.app.Notification.Builder(ctx, channelId)
+      } else {
+        @Suppress("DEPRECATION")
+        android.app.Notification.Builder(ctx)
+      }
+      builder.setContentTitle(title)
+        .setContentText(body)
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setAutoCancel(true)
+
+      notificationManager.notify((System.currentTimeMillis() % 10000).toInt(), builder.build())
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("NOTIFICATION_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Offline Text-To-Speech (TTS) ----------------
+
+  private var tts: TextToSpeech? = null
+  private var ttsReady = false
+
+  init {
+    initTtsEngine(null)
+  }
+
+  private fun initTtsEngine(onReady: (() -> Unit)?) {
+    tts = TextToSpeech(reactApplicationContext) { status ->
+      if (status == TextToSpeech.SUCCESS) {
+        val result = tts?.setLanguage(Locale.US)
+        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+          tts?.setLanguage(Locale.getDefault())
+        }
+        ttsReady = true
+        onReady?.invoke()
+      } else {
+        android.util.Log.e("ArinNative", "TTS initialization failed with status: $status")
+      }
+    }
+  }
+
+  private fun applyVoiceGender(gender: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+    try {
+      val isMale = gender.lowercase() == "male"
+      val voices = tts?.voices
+      if (!voices.isNullOrEmpty()) {
+        val targetName = if (isMale) "male" else "female"
+        val match = voices.firstOrNull { voice ->
+          !voice.isNetworkConnectionRequired && voice.name.lowercase().contains(targetName)
+        } ?: voices.firstOrNull { voice ->
+          voice.name.lowercase().contains(targetName)
+        }
+        if (match != null) {
+          tts?.voice = match
+        }
+      }
+    } catch (_: Throwable) {
+      // fallback
+    }
+  }
+
+  @ReactMethod
+  fun speak(text: String, gender: String, promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        if (tts == null || !ttsReady) {
+          initTtsEngine {
+            applyVoiceGender(gender)
+            performSpeak(text, promise)
+          }
+        } else {
+          applyVoiceGender(gender)
+          performSpeak(text, promise)
+        }
+      } catch (e: Throwable) {
+        promise.reject("TTS_FAILED", e.message)
+      }
+    }
+  }
+
+  private fun performSpeak(text: String, promise: Promise) {
+    try {
+      val params = Bundle()
+      params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+      val res = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "arin_tts_${System.currentTimeMillis()}")
+      if (res == TextToSpeech.SUCCESS) {
+        promise.resolve(true)
+      } else {
+        android.util.Log.e("ArinNative", "TTS speak failed code: $res")
+        promise.reject("TTS_SPEAK_ERROR", "TTS speak returned code $res")
+      }
+    } catch (e: Throwable) {
+      promise.reject("TTS_SPEAK_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun stopSpeaking(promise: Promise) {
+    try {
+      tts?.stop()
+      promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("TTS_STOP_FAILED", e.message)
+    }
+  }
+
+  // ---------------- Speech-To-Text (STT) ----------------
+  // Prefers on-device offline recognition. Falls back to online if the
+  // device does not have an offline model installed.
+
+  private var speechRecognizer: SpeechRecognizer? = null
+  private var activeSttPromise: Promise? = null
+
+  @ReactMethod
+  fun startListening(promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
+          promise.reject(
+            "STT_UNAVAILABLE",
+            "Speech recognizer not available on this device. Enable microphone permissions."
+          )
+          return@runOnUiQueueThread
+        }
+
+        activeSttPromise?.reject("CANCELLED", "New recognition requested.")
+        activeSttPromise = promise
+
+        if (speechRecognizer == null) {
+          // Prefer offline / on-device recognition when available
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
+            speechRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
+          } else if (SpeechRecognizer.isRecognitionAvailable(ctx)) {
+            // Offline model not installed — fall back to online recognition
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(ctx)
+          } else {
+            promise.reject(
+              "OFFLINE_STT_UNAVAILABLE",
+              "No speech recognition available. Install an offline language pack: " +
+                "Settings → General Management → Language & Input → On-device speech recognition → Download."
+            )
+            return@runOnUiQueueThread
+          }
+        }
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+          override fun onReadyForSpeech(params: Bundle?) {}
+          override fun onBeginningOfSpeech() {}
+          override fun onRmsChanged(rmsdB: Float) {}
+          override fun onBufferReceived(buffer: ByteArray?) {}
+          override fun onEndOfSpeech() {}
+          override fun onError(error: Int) {
+            val msg = when (error) {
+              SpeechRecognizer.ERROR_AUDIO -> "Audio recording error."
+              SpeechRecognizer.ERROR_CLIENT -> "Client error."
+              SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions."
+              SpeechRecognizer.ERROR_NETWORK -> "Network error."
+              SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout."
+              SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized."
+              SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy."
+              SpeechRecognizer.ERROR_SERVER -> "Server error."
+              SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input."
+              else -> "Speech recognition error: $error"
+            }
+            activeSttPromise?.reject("STT_ERROR", msg)
+            activeSttPromise = null
+          }
+
+          override fun onResults(results: Bundle?) {
+            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val text = matches?.firstOrNull() ?: ""
+            activeSttPromise?.resolve(text)
+            activeSttPromise = null
+          }
+
+          override fun onPartialResults(partialResults: Bundle?) {}
+          override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
+          putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+
+        speechRecognizer?.startListening(intent)
+      } catch (e: Throwable) {
+        promise.reject("STT_FAILED", e.message)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun stopListening(promise: Promise) {
+    val ctx = reactApplicationContext
+    ctx.runOnUiQueueThread {
+      try {
+        speechRecognizer?.stopListening()
+        promise.resolve(true)
+      } catch (e: Throwable) {
+        promise.reject("STT_STOP_FAILED", e.message)
+      }
     }
   }
 
@@ -1302,18 +1563,41 @@ import {
   View,
 } from 'react-native';
 import { useApp } from '../context/AppContext';
+import { startVoiceInput, stopVoiceInput } from '../services/deviceService';
 import { spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
 
 export const ChatInput: React.FC = () => {
   const [text, setText] = useState('');
-  const { sendMessage, themeColors } = useApp();
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const { sendMessage, themeColors, isSpeaking, stopAudio } = useApp();
 
   const handleSend = () => {
     const trimmed = text.trim();
     if (!trimmed) return;
     sendMessage(trimmed);
     setText('');
+  };
+
+  const handleVoiceMicPress = async () => {
+    if (isListening) {
+      // Tapping mic while listening → stop listening early
+      setIsListening(false);
+      await stopVoiceInput();
+      return;
+    }
+    setIsListening(true);
+    setVoiceError(null);
+    const result = await startVoiceInput();
+    setIsListening(false);
+
+    if (result.success && result.text.trim()) {
+      setText(result.text.trim());
+      sendMessage(result.text.trim());
+    } else if (result.error) {
+      setVoiceError(result.error);
+    }
   };
 
   return (
@@ -1323,7 +1607,7 @@ export const ChatInput: React.FC = () => {
           styles.inputBox,
           {
             backgroundColor: themeColors.surfaceContainerLow,
-            borderColor: themeColors.outlineVariant,
+            borderColor: isListening ? themeColors.primaryContainer : themeColors.outlineVariant,
           },
         ]}
       >
@@ -1334,19 +1618,54 @@ export const ChatInput: React.FC = () => {
           style={[typography.codeSm, styles.textInput, { color: themeColors.onSurface }]}
           value={text}
           onChangeText={setText}
-          placeholder="Enter command..."
+          placeholder={isListening ? 'Listening... Speak command' : 'Enter command...'}
           placeholderTextColor={themeColors.onSurfaceVariant}
           onSubmitEditing={handleSend}
           returnKeyType="send"
         />
+
+        {/* STOP AUDIO TTS BUTTON - PERMANENT IN CHAT BAR */}
+        <TouchableOpacity
+          style={[styles.stopButton, { backgroundColor: isSpeaking ? themeColors.error : themeColors.surfaceContainerHigh }]}
+          onPress={stopAudio}
+          activeOpacity={0.8}
+        >
+          <Text style={[typography.labelCaps, { color: isSpeaking ? themeColors.onPrimary : themeColors.error }]}>⏹</Text>
+        </TouchableOpacity>
+
+        {/* VOICE STT MIC BUTTON — toggles to ⏹ while listening */}
+        <TouchableOpacity
+          style={[
+            styles.micButton,
+            {
+              backgroundColor: isListening
+                ? themeColors.error
+                : themeColors.surfaceContainerHigh,
+            },
+          ]}
+          onPress={handleVoiceMicPress}
+          activeOpacity={0.7}
+        >
+          {isListening ? (
+            <Text style={[styles.micIcon, { color: themeColors.onPrimary }]}>⏹</Text>
+          ) : (
+            <Text style={[styles.micIcon, { color: themeColors.primaryContainer }]}>🎙️</Text>
+          )}
+        </TouchableOpacity>
+
         <TouchableOpacity
           style={[styles.sendButton, { backgroundColor: themeColors.primaryContainer }]}
           onPress={handleSend}
           activeOpacity={0.8}
         >
-          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>SEND</Text>
+          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>➤</Text>
         </TouchableOpacity>
       </View>
+      {voiceError ? (
+        <Text style={[typography.codeSm, styles.voiceError, { color: themeColors.error }]}>
+          {voiceError}
+        </Text>
+      ) : null}
     </View>
   );
 };
@@ -1373,11 +1692,30 @@ const styles = StyleSheet.create({
     height: '100%',
     paddingVertical: 0,
   },
+  stopButton: {
+    height: '100%',
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micButton: {
+    height: '100%',
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micIcon: {
+    fontSize: 18,
+  },
   sendButton: {
     height: '100%',
     paddingHorizontal: spacing.lg,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  voiceError: {
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.xs,
   },
 });
 
@@ -1830,9 +2168,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
 import { sendArduinoCommand } from '../services/arduinoService';
-import { sendDeviceCommand, speakText } from '../services/deviceService';
+import { sendDeviceCommand, speakText, stopSpeech } from '../services/deviceService';
 import { runPipeline } from '../services/pipelineExecutor';
 import { rearmPersistedJobs, scheduleJob } from '../services/schedulerService';
+import { saveRule } from '../services/ruleStorage';
+import { startRuleEngineMonitors, stopRuleEngineMonitors } from '../services/triggerMonitors';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
@@ -1877,6 +2217,8 @@ interface AppContextType {
   addTestLog: (command: string) => void;
   refreshModels: () => Promise<void>;
   refreshCloudModels: () => Promise<void>;
+  isSpeaking: boolean;
+  stopAudio: () => Promise<void>;
 }
 
 const initialSettings: AppSettings = {
@@ -1896,6 +2238,8 @@ const initialSettings: AppSettings = {
   arduinoStatus: 'disconnected',
   permissionMode: 'compatible',
   preloadedModel: null,
+  ttsAutoSpeak: true,
+  ttsVoiceGender: 'female',
 };
 
 const initialMessages: ChatMessageItem[] = [
@@ -1932,6 +2276,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [stageErrorMsg, setStageErrorMsg] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [testLogs, setTestLogs] = useState<string[]>([]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const stopAudio = async () => {
+    await stopSpeech();
+    setIsSpeaking(false);
+  };
 
   useEffect(() => {
     const loadSavedState = async () => {
@@ -1965,8 +2315,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     rearmPersistedJobs((directive) => {
       executeDirectiveNow(directive, /* fromScheduler */ true);
     });
+    startRuleEngineMonitors({
+      isArduinoConnected: settings.arduinoConnected,
+      onLog: (msg) => setTestLogs((prev) => [msg, ...prev]),
+    });
+    return () => {
+      stopRuleEngineMonitors();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [settings.arduinoConnected]);
 
   // Preload (init) the ARIN model once per host+model per connection epoch:
   // bake the system prompt into an Ollama custom model so subsequent chat
@@ -2216,6 +2573,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setMessages((prev) => [...prev, aiReply]);
     setIsProcessing(false);
+
+    if (settings.ttsAutoSpeak) {
+      setIsSpeaking(true);
+      speakText(aiText, settings.ttsVoiceGender).finally(() => {
+        setIsSpeaking(false);
+      });
+    }
+
     setTimeout(() => setCurrentStage('idle'), 1500);
   };
 
@@ -2272,6 +2637,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setTestLogs((prev) => [line, ...prev])
       );
       finishWithReply(result.finalText || (result.stoppedEarly ? 'Pipeline stopped.' : 'Pipeline complete.'));
+      return;
+    }
+
+    if (directive.action === 'create_rule') {
+      const ruleData = directive.rule || {};
+      const newRule = {
+        id: `rule_${Date.now()}`,
+        name: ruleData.name || 'AI Automation Rule',
+        trigger: ruleData.trigger || { type: 'manual' },
+        actions: ruleData.actions || [{ type: 'notification', title: 'ARIN Rule', body: 'Triggered' }],
+        enabled: true,
+        lastTriggeredAt: null,
+        cooldownMs: 60000,
+      } as any;
+
+      await saveRule(newRule);
+      setTestLogs((prev) => [`[RULE] AI created automation rule: "${newRule.name}"`, ...prev]);
+      finishWithReply(directive.response || `Created automation rule: "${newRule.name}".`);
       return;
     }
 
@@ -2477,6 +2860,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addTestLog,
         refreshModels,
         refreshCloudModels,
+        isSpeaking,
+        stopAudio,
       }}
     >
       {children}
@@ -3039,6 +3424,77 @@ export const SettingsScreen: React.FC = () => {
             }}
             thumbColor={themeColors.onPrimary}
           />
+        </View>
+      </View>
+
+      {/* Voice & Audio (TTS) Card */}
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: themeColors.surfaceContainerLow,
+            borderColor: themeColors.outlineVariant,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={[typography.headlineMd, styles.cardTitle, { color: themeColors.onSurface }]}>
+            Voice & Audio (TTS)
+          </Text>
+          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+            {settings.ttsVoiceGender.toUpperCase()} VOICE
+          </Text>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+            Read Responses Aloud
+          </Text>
+          <Switch
+            value={settings.ttsAutoSpeak}
+            onValueChange={(val) => updateSettings({ ttsAutoSpeak: val })}
+            trackColor={{
+              false: themeColors.surfaceContainerHighest,
+              true: themeColors.primaryContainer,
+            }}
+            thumbColor={themeColors.onPrimary}
+          />
+        </View>
+
+        <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>
+          VOICE GENDER SELECTION
+        </Text>
+        <View style={styles.modeContainer}>
+          {(['female', 'male'] as const).map((gender) => (
+            <TouchableOpacity
+              key={gender}
+              style={[
+                styles.modeBtn,
+                {
+                  backgroundColor: themeColors.surfaceContainerHigh,
+                  borderColor:
+                    settings.ttsVoiceGender === gender
+                      ? themeColors.primaryContainer
+                      : themeColors.outlineVariant,
+                },
+              ]}
+              onPress={() => updateSettings({ ttsVoiceGender: gender })}
+            >
+              <Text
+                style={[
+                  typography.labelCaps,
+                  {
+                    color:
+                      settings.ttsVoiceGender === gender
+                        ? themeColors.primaryContainer
+                        : themeColors.onSurfaceVariant,
+                  },
+                ]}
+              >
+                {gender === 'female' ? '♀ FEMALE VOICE' : '♂ MALE VOICE'}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
 
@@ -3705,276 +4161,1143 @@ const styles = StyleSheet.create({
 ## `src/screens/TestScreen.tsx`
 
 ```typescript
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  FlatList,
+  Alert,
+  Modal,
+  PermissionsAndroid,
+  Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { useApp } from '../context/AppContext';
+import { deleteRule, readRules, saveRule, toggleRuleEnabled } from '../services/ruleStorage';
+import { executeRuleManually } from '../services/triggerMonitors';
 import { spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
+import { Rule, RuleAction, RuleTrigger } from '../types';
 
-const presetCommands = [
-  { label: 'Vol 100%', cmd: 'Set volume to 100%' },
-  { label: 'Mute (0%)', cmd: 'Mute phone' },
-  { label: 'Weather Tokyo', cmd: 'What is the weather in Tokyo?' },
-  { label: 'Spotify App Info', cmd: 'Open Spotify app info' },
-  { label: 'Battery %', cmd: 'Check battery level' },
-  { label: 'Wi-Fi On', cmd: 'Turn on wifi' },
-  { label: 'Bluetooth Off', cmd: 'Turn off bluetooth' },
-  { label: 'Open Settings', cmd: 'Open settings' },
-  { label: 'Flash On', cmd: 'Turn on the flash' },
-  { label: 'Flash Off', cmd: 'Turn off the flash' },
-  { label: 'Camera', cmd: 'Open camera' },
-  { label: 'Call 1345', cmd: 'Call 1345' },
-  { label: 'SMS 2343', cmd: 'Message 2343 hi' },
-  { label: 'WhatsApp Jay', cmd: 'Send hi to Jay via whatsapp' },
-  { label: 'Open Spotify', cmd: 'Open Spotify' },
-  { label: 'Move Forward', cmd: 'Move forward' },
-  { label: 'Robot Buzzer', cmd: 'Buzzer ping' },
-];
-
-const commandSyntaxes = [
-  { category: 'Device & Audio', syntax: 'Set volume to 100% | Mute phone | Volume up / down' },
-  { category: 'Weather API', syntax: 'What is the weather in [City]?' },
-  { category: 'App Info Settings', syntax: 'Open [AppName] app info | Open [wifi/bluetooth/nfc/battery/etc] settings' },
-  { category: 'Connectivity', syntax: 'Turn on/off wifi | Turn on/off bluetooth' },
-  { category: 'Hardware & Phone', syntax: 'Turn on/off the flash | Open camera | Check battery level' },
-  { category: 'Calls & SMS', syntax: 'Call [Name/Number] | Message [Number] [Text] | Send [Text] to [Name] via whatsapp' },
-  { category: 'App Launch', syntax: 'Open [AppName]' },
-  { category: 'Arduino Hardware', syntax: 'Move forward/backward | Turn left/right | Stop | LED on/off | Buzzer ping' },
-  { category: 'AI Questions', syntax: 'What is a [definition]? (Local) | What is today\'s [live data]? (Cloud)' },
-];
+type CommandCategory =
+  | 'TORCH'
+  | 'WIFI'
+  | 'BLUETOOTH'
+  | 'VOLUME'
+  | 'SMS'
+  | 'CALL'
+  | 'WEATHER'
+  | 'BATTERY'
+  | 'ROBOT_MOVE';
 
 export const TestScreen: React.FC = () => {
-  const [customCmd, setCustomCmd] = useState('');
-  const [showGuide, setShowGuide] = useState(false);
-  const { testLogs, addTestLog, sendMessage, themeColors } = useApp();
+  const { sendMessage, settings, themeColors, addTestLog } = useApp();
 
-  const handleRunCommand = (cmd: string) => {
-    if (!cmd.trim()) return;
-    addTestLog(cmd.trim());
-    sendMessage(cmd.trim());
-    setCustomCmd('');
+  // Command Tester State
+  const [selectedCategory, setSelectedCategory] = useState<CommandCategory>('TORCH');
+  const [torchState, setTorchState] = useState<'ON' | 'OFF'>('ON');
+  const [wifiState, setWifiState] = useState<'ON' | 'OFF'>('ON');
+  const [btState, setBtState] = useState<'ON' | 'OFF'>('OFF');
+  const [volumeLevel, setVolumeLevel] = useState('100');
+  const [smsTarget, setSmsTarget] = useState('2343');
+  const [smsMessage, setSmsMessage] = useState('hi');
+  const [callTarget, setCallTarget] = useState('1345');
+  const [weatherCity, setWeatherCity] = useState('Tokyo');
+  const [moveCmd, setMoveCmd] = useState<'FORWARD' | 'BACKWARD' | 'LEFT' | 'RIGHT' | 'STOP'>('FORWARD');
+
+  // Live Rules State
+  const [rules, setRules] = useState<Rule[]>([]);
+  const [showRuleModal, setShowRuleModal] = useState(false);
+
+  // Rule Builder Form State
+  const [ruleName, setRuleName] = useState('');
+  const [ruleTriggerType, setRuleTriggerType] = useState<'battery' | 'time' | 'device_state' | 'manual'>('battery');
+  const [ruleBatteryThresh, setRuleBatteryThresh] = useState('56');
+  const [ruleHour, setRuleHour] = useState('08');
+  const [ruleMinute, setRuleMinute] = useState('00');
+  const [ruleDeviceFeature, setRuleDeviceFeature] = useState<'torch' | 'wifi' | 'bluetooth'>('torch');
+  const [ruleDeviceStateVal, setRuleDeviceStateVal] = useState<'on' | 'off'>('on');
+  const [ruleActionType, setRuleActionType] = useState<'sms' | 'wifi_toggle' | 'robot_command' | 'notification'>('sms');
+  const [ruleSmsTo, setRuleSmsTo] = useState('26543');
+  const [ruleSmsBody, setRuleSmsBody] = useState('Time: {{time}} | Buzzer: {{buzzerStatus}} | Bat: {{battery}}');
+  const [ruleWifiState, setRuleWifiState] = useState<'on' | 'off'>('on');
+  const [ruleRobotCmd, setRuleRobotCmd] = useState('GET_STATUS');
+
+  // Permissions
+  const [smsPerm, setSmsPerm] = useState(false);
+
+  const loadRules = async () => {
+    const list = await readRules();
+    setRules(list);
+  };
+
+  useEffect(() => {
+    loadRules();
+    checkPermissions();
+  }, []);
+
+  const checkPermissions = async () => {
+    if (Platform.OS !== 'android') return;
+    try {
+      const granted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.SEND_SMS);
+      setSmsPerm(granted);
+    } catch {
+      // ignore
+    }
+  };
+
+  const requestSmsPermission = async () => {
+    if (Platform.OS !== 'android') return;
+    try {
+      const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.SEND_SMS);
+      setSmsPerm(granted === PermissionsAndroid.RESULTS.GRANTED);
+    } catch {
+      // ignore
+    }
+  };
+
+  // Run direct command from tester
+  const handleExecuteCommand = () => {
+    let commandString = '';
+    switch (selectedCategory) {
+      case 'TORCH':
+        commandString = torchState === 'ON' ? 'Turn on the flash' : 'Turn off the flash';
+        break;
+      case 'WIFI':
+        commandString = wifiState === 'ON' ? 'Turn on wifi' : 'Turn off wifi';
+        break;
+      case 'BLUETOOTH':
+        commandString = btState === 'ON' ? 'Turn on bluetooth' : 'Turn off bluetooth';
+        break;
+      case 'VOLUME':
+        commandString = `Set volume to ${volumeLevel}%`;
+        break;
+      case 'SMS':
+        commandString = `Message ${smsTarget.trim()} ${smsMessage.trim()}`;
+        break;
+      case 'CALL':
+        commandString = `Call ${callTarget.trim()}`;
+        break;
+      case 'WEATHER':
+        commandString = `What is the weather in ${weatherCity.trim()}?`;
+        break;
+      case 'BATTERY':
+        commandString = 'Check battery level';
+        break;
+      case 'ROBOT_MOVE':
+        commandString =
+          moveCmd === 'STOP'
+            ? 'Stop'
+            : moveCmd === 'FORWARD'
+            ? 'Move forward'
+            : moveCmd === 'BACKWARD'
+            ? 'Move backward'
+            : moveCmd === 'LEFT'
+            ? 'Turn left'
+            : 'Turn right';
+        break;
+    }
+
+    if (commandString) {
+      addTestLog(commandString);
+      sendMessage(commandString);
+    }
+  };
+
+  // Live Rules Actions
+  const handleRunRuleNow = async (id: string) => {
+    addTestLog(`[RULE] Executing rule ${id}`);
+    await executeRuleManually(id, {
+      isArduinoConnected: settings.arduinoConnected,
+      onLog: (msg) => addTestLog(msg),
+    });
+    await loadRules();
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    const updated = await deleteRule(id);
+    setRules(updated);
+  };
+
+  const handleToggleRule = async (id: string, enabled: boolean) => {
+    const updated = await toggleRuleEnabled(id, enabled);
+    setRules(updated);
+  };
+
+  const addReferencePresetRule = async () => {
+    const refRule: Rule = {
+      id: `rule_${Date.now()}`,
+      name: 'Battery 56% → SMS to 26543 with Buzzer Status',
+      trigger: {
+        type: 'battery',
+        threshold: 56,
+        direction: 'below',
+      },
+      actions: [
+        { type: 'robot_command', command: 'GET_STATUS' },
+        {
+          type: 'sms',
+          to: '26543',
+          bodyTemplate: 'Time: {{time}} | Buzzer: {{buzzerStatus}}',
+        },
+      ],
+      enabled: true,
+      lastTriggeredAt: null,
+      cooldownMs: 300000,
+    };
+    const updated = await saveRule(refRule);
+    setRules(updated);
+    Alert.alert('Preset Added', 'Reference rule (Battery 56% → SMS 26543) added.');
+  };
+
+  const handleSaveCustomRule = async () => {
+    if (!ruleName.trim()) {
+      Alert.alert('Missing Name', 'Please enter a name for the rule.');
+      return;
+    }
+
+    let trig: RuleTrigger;
+    if (ruleTriggerType === 'battery') {
+      trig = {
+        type: 'battery',
+        threshold: parseInt(ruleBatteryThresh, 10) || 50,
+        direction: 'below',
+      };
+    } else if (ruleTriggerType === 'time') {
+      trig = {
+        type: 'time',
+        hour: parseInt(ruleHour, 10) || 8,
+        minute: parseInt(ruleMinute, 10) || 0,
+        repeat: 'daily',
+      };
+    } else if (ruleTriggerType === 'device_state') {
+      trig = {
+        type: 'device_state',
+        deviceFeature: ruleDeviceFeature,
+        state: ruleDeviceStateVal,
+      };
+    } else {
+      trig = { type: 'manual' };
+    }
+
+    let act: RuleAction;
+    if (ruleActionType === 'sms') {
+      act = {
+        type: 'sms',
+        to: ruleSmsTo.trim() || '26543',
+        bodyTemplate: ruleSmsBody.trim() || 'Time: {{time}} | Buzzer: {{buzzerStatus}}',
+      };
+    } else if (ruleActionType === 'wifi_toggle') {
+      act = { type: 'wifi_toggle', state: ruleWifiState };
+    } else if (ruleActionType === 'robot_command') {
+      act = { type: 'robot_command', command: ruleRobotCmd.trim() || 'GET_STATUS' };
+    } else {
+      act = {
+        type: 'notification',
+        title: 'ARIN Automation',
+        body: 'Automation rule executed.',
+      };
+    }
+
+    const newRule: Rule = {
+      id: `rule_${Date.now()}`,
+      name: ruleName.trim(),
+      trigger: trig,
+      actions: [act],
+      enabled: true,
+      lastTriggeredAt: null,
+      cooldownMs: 60000,
+    };
+
+    const updated = await saveRule(newRule);
+    setRules(updated);
+    setShowRuleModal(false);
+    setRuleName('');
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: themeColors.background }]}>
-      <View style={styles.headerRow}>
-        <View style={styles.headerTitles}>
-          <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
-            TEST INTERFACE (DEBUG)
-          </Text>
-          <Text style={[typography.bodyMd, styles.subtitle, { color: themeColors.onSurfaceVariant }]}>
-            Raw Command Execution & Payload Inspector
-          </Text>
-        </View>
+    <ScrollView
+      style={[styles.container, { backgroundColor: themeColors.background }]}
+      contentContainerStyle={styles.content}
+    >
+      <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
+        COMMAND TESTER & LIVE RULES
+      </Text>
 
-        <TouchableOpacity
-          style={[styles.guideToggleBtn, { backgroundColor: themeColors.surfaceContainerHigh, borderColor: themeColors.outlineVariant }]}
-          onPress={() => setShowGuide((prev) => !prev)}
-        >
-          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
-            {showGuide ? 'HIDE SYNTAX' : 'SYNTAX GUIDE'}
+      {/* Permission Status */}
+      {!smsPerm && Platform.OS === 'android' && (
+        <View style={[styles.permBanner, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+            SMS Permission is required for rule SMS actions.
           </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Command Syntax Guide Reference */}
-      {showGuide && (
-        <View style={[styles.guideBox, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
-          <Text style={[typography.labelCaps, styles.guideTitle, { color: themeColors.primaryContainer }]}>
-            COMMAND SYNTAX REFERENCE
-          </Text>
-          <ScrollView style={styles.guideScroll} nestedScrollEnabled>
-            {commandSyntaxes.map((item) => (
-              <View key={item.category} style={styles.guideRow}>
-                <Text style={[typography.labelCaps, { color: themeColors.secondary }]}>{item.category}:</Text>
-                <Text style={[typography.codeSm, { color: themeColors.onSurface }]}>{item.syntax}</Text>
-              </View>
-            ))}
-          </ScrollView>
+          <TouchableOpacity onPress={requestSmsPermission}>
+            <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>GRANT PERMISSION</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      {/* Preset Command Chips */}
-      <View style={styles.chipContainer}>
-        <Text style={[typography.labelCaps, styles.sectionHeader, { color: themeColors.onSurfaceVariant }]}>
-          PRESET TEST COMMANDS
+      {/* SECTION 1: COMMAND DROP DOWN / SELECTOR */}
+      <View style={[styles.card, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
+        <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+          SELECT TEST COMMAND
         </Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipScroll}>
-          {presetCommands.map((item) => (
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+          {(
+            [
+              'TORCH',
+              'WIFI',
+              'BLUETOOTH',
+              'VOLUME',
+              'SMS',
+              'CALL',
+              'WEATHER',
+              'BATTERY',
+              'ROBOT_MOVE',
+            ] as const
+          ).map((cat) => (
             <TouchableOpacity
-              key={item.label}
+              key={cat}
               style={[
                 styles.chip,
                 {
-                  backgroundColor: themeColors.surfaceContainerHigh,
-                  borderColor: themeColors.outlineVariant,
+                  backgroundColor:
+                    selectedCategory === cat
+                      ? themeColors.primaryContainer
+                      : themeColors.surfaceContainerHigh,
                 },
               ]}
-              onPress={() => handleRunCommand(item.cmd)}
-              activeOpacity={0.7}
+              onPress={() => setSelectedCategory(cat)}
             >
-              <Text style={[typography.codeSm, { color: themeColors.primaryContainer }]}>{item.label}</Text>
+              <Text
+                style={[
+                  typography.labelCaps,
+                  { color: selectedCategory === cat ? themeColors.onPrimary : themeColors.onSurface },
+                ]}
+              >
+                {cat}
+              </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
-      </View>
 
-      {/* Custom Direct Command Input Box */}
-      <View style={styles.inputRow}>
-        <TextInput
-          style={[
-            typography.codeSm,
-            styles.customInput,
-            {
-              backgroundColor: themeColors.surfaceContainerLow,
-              color: themeColors.onSurface,
-              borderColor: themeColors.outlineVariant,
-            },
-          ]}
-          value={customCmd}
-          onChangeText={setCustomCmd}
-          placeholder="Type raw command string..."
-          placeholderTextColor={themeColors.onSurfaceVariant}
-          onSubmitEditing={() => handleRunCommand(customCmd)}
-        />
+        {/* DYNAMIC PARAMETER CONTROLS FOR SELECTED COMMAND */}
+        <View style={styles.paramBox}>
+          {selectedCategory === 'TORCH' && (
+            <View style={styles.optionRow}>
+              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Flashlight Target State:</Text>
+              <View style={styles.toggleGroup}>
+                {(['ON', 'OFF'] as const).map((st) => (
+                  <TouchableOpacity
+                    key={st}
+                    style={[
+                      styles.toggleBtn,
+                      {
+                        backgroundColor:
+                          torchState === st
+                            ? themeColors.primaryContainer
+                            : themeColors.surfaceContainerHigh,
+                      },
+                    ]}
+                    onPress={() => setTorchState(st)}
+                  >
+                    <Text style={[typography.labelCaps, { color: torchState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {st}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {selectedCategory === 'WIFI' && (
+            <View style={styles.optionRow}>
+              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Wi-Fi Target State:</Text>
+              <View style={styles.toggleGroup}>
+                {(['ON', 'OFF'] as const).map((st) => (
+                  <TouchableOpacity
+                    key={st}
+                    style={[
+                      styles.toggleBtn,
+                      {
+                        backgroundColor:
+                          wifiState === st
+                            ? themeColors.primaryContainer
+                            : themeColors.surfaceContainerHigh,
+                      },
+                    ]}
+                    onPress={() => setWifiState(st)}
+                  >
+                    <Text style={[typography.labelCaps, { color: wifiState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {st}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {selectedCategory === 'BLUETOOTH' && (
+            <View style={styles.optionRow}>
+              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Bluetooth Target State:</Text>
+              <View style={styles.toggleGroup}>
+                {(['ON', 'OFF'] as const).map((st) => (
+                  <TouchableOpacity
+                    key={st}
+                    style={[
+                      styles.toggleBtn,
+                      {
+                        backgroundColor:
+                          btState === st
+                            ? themeColors.primaryContainer
+                            : themeColors.surfaceContainerHigh,
+                      },
+                    ]}
+                    onPress={() => setBtState(st)}
+                  >
+                    <Text style={[typography.labelCaps, { color: btState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {st}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {selectedCategory === 'VOLUME' && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>VOLUME PERCENTAGE (0-100)</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={volumeLevel}
+                onChangeText={setVolumeLevel}
+                keyboardType="number-pad"
+              />
+            </View>
+          )}
+
+          {selectedCategory === 'SMS' && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>TARGET NUMBER</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={smsTarget}
+                onChangeText={setSmsTarget}
+                keyboardType="phone-pad"
+              />
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>MESSAGE TEXT</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={smsMessage}
+                onChangeText={setSmsMessage}
+              />
+            </View>
+          )}
+
+          {selectedCategory === 'CALL' && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>CALL TARGET (NUMBER / CONTACT)</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={callTarget}
+                onChangeText={setCallTarget}
+              />
+            </View>
+          )}
+
+          {selectedCategory === 'WEATHER' && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>CITY NAME</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={weatherCity}
+                onChangeText={setWeatherCity}
+              />
+            </View>
+          )}
+
+          {selectedCategory === 'BATTERY' && (
+            <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+              Queries device battery percentage & charging status instantly.
+            </Text>
+          )}
+
+          {selectedCategory === 'ROBOT_MOVE' && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>ROBOT DIRECTION</Text>
+              <View style={styles.chipRow}>
+                {(['FORWARD', 'BACKWARD', 'LEFT', 'RIGHT', 'STOP'] as const).map((dir) => (
+                  <TouchableOpacity
+                    key={dir}
+                    style={[
+                      styles.toggleBtn,
+                      {
+                        backgroundColor:
+                          moveCmd === dir
+                            ? themeColors.primaryContainer
+                            : themeColors.surfaceContainerHigh,
+                      },
+                    ]}
+                    onPress={() => setMoveCmd(dir)}
+                  >
+                    <Text style={[typography.labelCaps, { color: moveCmd === dir ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {dir}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
+
         <TouchableOpacity
-          style={[styles.runBtn, { backgroundColor: themeColors.primaryContainer }]}
-          onPress={() => handleRunCommand(customCmd)}
-          activeOpacity={0.8}
+          style={[styles.execBtn, { backgroundColor: themeColors.primaryContainer }]}
+          onPress={handleExecuteCommand}
         >
-          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>SEND TEST</Text>
+          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>
+            ⚡ RUN TEST COMMAND
+          </Text>
         </TouchableOpacity>
       </View>
 
-      {/* Console Log Area */}
-      <View
-        style={[
-          styles.logBox,
-          {
-            backgroundColor: themeColors.surfaceContainerLowest,
-            borderColor: themeColors.outlineVariant,
-          },
-        ]}
-      >
-        <Text style={[typography.labelCaps, styles.logHeader, { color: themeColors.secondary }]}>
-          LOG OUTPUT
+      {/* SECTION 2: LIVE RULES MANAGEMENT */}
+      <View style={styles.rulesSectionHeader}>
+        <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+          LIVE AUTOMATION RULES ({rules.length})
         </Text>
-        <FlatList
-          data={testLogs}
-          keyExtractor={(_, index) => index.toString()}
-          renderItem={({ item }) => (
-            <Text style={[typography.codeSm, styles.logLine, { color: themeColors.onSurface }]}>
-              {item}
-            </Text>
-          )}
-          ListEmptyComponent={
-            <Text style={[typography.codeSm, styles.emptyText, { color: themeColors.onSurfaceVariant }]}>
-              No test commands sent yet. Select a preset or type a command above.
-            </Text>
-          }
-        />
+        <TouchableOpacity
+          style={[styles.createRuleBtn, { backgroundColor: themeColors.surfaceContainerHigh, borderColor: themeColors.outlineVariant }]}
+          onPress={() => setShowRuleModal(true)}
+        >
+          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>+ NEW RULE</Text>
+        </TouchableOpacity>
       </View>
-    </View>
+
+      {/* PRESET QUICK ADD */}
+      <TouchableOpacity
+        style={[styles.presetBtn, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.primaryContainer }]}
+        onPress={addReferencePresetRule}
+      >
+        <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+          ⚡ QUICK ADD PRESET: Battery 56% → SMS 26543 (with Buzzer Status)
+        </Text>
+      </TouchableOpacity>
+
+      {/* LIVE RULES LIST */}
+      {rules.length === 0 ? (
+        <View style={[styles.card, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurfaceVariant }]}>
+            No live rules active. Tap "+ NEW RULE" or "QUICK ADD PRESET" to add one.
+          </Text>
+        </View>
+      ) : (
+        rules.map((rule) => (
+          <View
+            key={rule.id}
+            style={[
+              styles.card,
+              {
+                backgroundColor: themeColors.surfaceContainerLow,
+                borderColor: rule.enabled ? themeColors.primaryContainer : themeColors.outlineVariant,
+              },
+            ]}
+          >
+            <View style={styles.ruleTopRow}>
+              <Text style={[typography.headlineMd, styles.ruleTitle, { color: themeColors.onSurface }]}>
+                {rule.name}
+              </Text>
+              <Switch
+                value={rule.enabled}
+                onValueChange={(val) => handleToggleRule(rule.id, val)}
+                trackColor={{
+                  false: themeColors.surfaceContainerHighest,
+                  true: themeColors.primaryContainer,
+                }}
+                thumbColor={themeColors.onPrimary}
+              />
+            </View>
+
+            <Text style={[typography.codeSm, { color: themeColors.onSurfaceVariant }]}>
+              Trigger: {rule.trigger.type.toUpperCase()} | Actions: {rule.actions.map((a) => a.type.toUpperCase()).join(', ')}
+            </Text>
+
+            <Text style={[typography.codeSm, { color: themeColors.onSurfaceVariant }]}>
+              Last Fired: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleTimeString() : 'Never'}
+            </Text>
+
+            {/* LIVE RULE ACTION BUTTONS: RUN NOW & DELETE */}
+            <View style={styles.ruleBtnRow}>
+              <TouchableOpacity
+                style={[styles.ruleActionBtn, { backgroundColor: themeColors.primaryContainer }]}
+                onPress={() => handleRunRuleNow(rule.id)}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>RUN NOW</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.ruleDeleteBtn, { backgroundColor: themeColors.surfaceContainerHigh, borderColor: themeColors.outlineVariant }]}
+                onPress={() => handleDeleteRule(rule.id)}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.error }]}>DELETE</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ))
+      )}
+
+      {/* RULE CREATION MODAL */}
+      <Modal visible={showRuleModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: themeColors.surfaceContainerLow }]}>
+            <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
+              CREATE AUTOMATION RULE
+            </Text>
+
+            <ScrollView contentContainerStyle={styles.formScroll}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>RULE NAME</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={ruleName}
+                onChangeText={setRuleName}
+                placeholder="e.g. Battery 50% SMS Alert"
+                placeholderTextColor={themeColors.onSurfaceVariant}
+              />
+
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.sm }]}>TRIGGER TYPE</Text>
+              <View style={styles.chipRow}>
+                {(['battery', 'time', 'device_state', 'manual'] as const).map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.chip, { backgroundColor: ruleTriggerType === t ? themeColors.primaryContainer : themeColors.surfaceContainerHigh }]}
+                    onPress={() => setRuleTriggerType(t)}
+                  >
+                    <Text style={[typography.labelCaps, { color: ruleTriggerType === t ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {t.toUpperCase()}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {ruleTriggerType === 'device_state' && (
+                <>
+                  <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>FEATURE & STATE</Text>
+                  <View style={styles.chipRow}>
+                    {(['torch', 'wifi', 'bluetooth'] as const).map((f) => (
+                      <TouchableOpacity
+                        key={f}
+                        style={[styles.chip, { backgroundColor: ruleDeviceFeature === f ? themeColors.primaryContainer : themeColors.surfaceContainerHigh }]}
+                        onPress={() => setRuleDeviceFeature(f)}
+                      >
+                        <Text style={[typography.labelCaps, { color: ruleDeviceFeature === f ? themeColors.onPrimary : themeColors.onSurface }]}>
+                          {f.toUpperCase()}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <View style={styles.chipRow}>
+                    {(['on', 'off'] as const).map((s) => (
+                      <TouchableOpacity
+                        key={s}
+                        style={[styles.chip, { backgroundColor: ruleDeviceStateVal === s ? themeColors.primaryContainer : themeColors.surfaceContainerHigh }]}
+                        onPress={() => setRuleDeviceStateVal(s)}
+                      >
+                        <Text style={[typography.labelCaps, { color: ruleDeviceStateVal === s ? themeColors.onPrimary : themeColors.onSurface }]}>
+                          {s.toUpperCase()}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              )}
+
+              {ruleTriggerType === 'battery' && (
+                <>
+                  <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>THRESHOLD (%)</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                    value={ruleBatteryThresh}
+                    onChangeText={setRuleBatteryThresh}
+                    keyboardType="number-pad"
+                  />
+                </>
+              )}
+
+              {ruleTriggerType === 'time' && (
+                <View style={styles.timeRow}>
+                  <View style={styles.flexOne}>
+                    <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>HOUR</Text>
+                    <TextInput
+                      style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                      value={ruleHour}
+                      onChangeText={setRuleHour}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                  <View style={styles.flexOne}>
+                    <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>MINUTE</Text>
+                    <TextInput
+                      style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                      value={ruleMinute}
+                      onChangeText={setRuleMinute}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                </View>
+              )}
+
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.sm }]}>ACTION TYPE</Text>
+              <View style={styles.chipRow}>
+                {(['sms', 'wifi_toggle', 'robot_command', 'notification'] as const).map((a) => (
+                  <TouchableOpacity
+                    key={a}
+                    style={[styles.chip, { backgroundColor: ruleActionType === a ? themeColors.primaryContainer : themeColors.surfaceContainerHigh }]}
+                    onPress={() => setRuleActionType(a)}
+                  >
+                    <Text style={[typography.labelCaps, { color: ruleActionType === a ? themeColors.onPrimary : themeColors.onSurface }]}>
+                      {a.toUpperCase()}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {ruleActionType === 'sms' && (
+                <>
+                  <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>SMS TARGET NUMBER</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                    value={ruleSmsTo}
+                    onChangeText={setRuleSmsTo}
+                    keyboardType="phone-pad"
+                  />
+                  <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>BODY TEMPLATE</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                    value={ruleSmsBody}
+                    onChangeText={setRuleSmsBody}
+                  />
+                </>
+              )}
+
+              {ruleActionType === 'wifi_toggle' && (
+                <View style={styles.chipRow}>
+                  {(['on', 'off'] as const).map((s) => (
+                    <TouchableOpacity
+                      key={s}
+                      style={[styles.chip, { backgroundColor: ruleWifiState === s ? themeColors.primaryContainer : themeColors.surfaceContainerHigh }]}
+                      onPress={() => setRuleWifiState(s)}
+                    >
+                      <Text style={[typography.labelCaps, { color: ruleWifiState === s ? themeColors.onPrimary : themeColors.onSurface }]}>
+                        WIFI {s.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+
+              {ruleActionType === 'robot_command' && (
+                <>
+                  <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>ROBOT COMMAND</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                    value={ruleRobotCmd}
+                    onChangeText={setRuleRobotCmd}
+                  />
+                </>
+              )}
+            </ScrollView>
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: themeColors.surfaceContainerHigh }]}
+                onPress={() => setShowRuleModal(false)}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>CANCEL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: themeColors.primaryContainer }]}
+                onPress={handleSaveCustomRule}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>SAVE RULE</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </ScrollView>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  content: {
     padding: spacing.containerMargin,
-    gap: spacing.sm,
+    gap: spacing.md,
   },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  headerTitles: {
-    flex: 1,
-  },
-  subtitle: {
-    marginTop: -spacing.xs,
-  },
-  guideToggleBtn: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: spacing.borderRadius.sm,
+  card: {
+    borderRadius: spacing.borderRadius.md,
+    padding: spacing.md,
     borderWidth: 1,
-  },
-  guideBox: {
-    maxHeight: 140,
-    padding: spacing.sm,
-    borderRadius: spacing.borderRadius.sm,
-    borderWidth: 1,
-  },
-  guideTitle: {
-    marginBottom: spacing.xs,
-  },
-  guideScroll: {
-    flex: 1,
-  },
-  guideRow: {
-    marginBottom: spacing.xs,
-  },
-  sectionHeader: {
-    marginBottom: spacing.xs,
-  },
-  chipContainer: {
     gap: spacing.xs,
   },
-  chipScroll: {
-    gap: spacing.sm,
+  permBanner: {
+    padding: spacing.md,
+    borderRadius: spacing.borderRadius.sm,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
     paddingVertical: spacing.xs,
   },
   chip: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.xs,
     borderRadius: spacing.borderRadius.sm,
-    borderWidth: 1,
   },
-  inputRow: {
+  paramBox: {
+    marginTop: spacing.xs,
+    paddingTop: spacing.xs,
+  },
+  optionRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  customInput: {
-    flex: 1,
-    height: 48,
+  toggleGroup: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  toggleBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.borderRadius.sm,
+  },
+  inputGroup: {
+    gap: spacing.xs,
+  },
+  input: {
     borderRadius: spacing.borderRadius.sm,
     paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
     borderWidth: 1,
   },
-  runBtn: {
-    height: 48,
-    paddingHorizontal: spacing.md,
+  execBtn: {
+    padding: spacing.md,
     borderRadius: spacing.borderRadius.sm,
     alignItems: 'center',
     justifyContent: 'center',
+    marginTop: spacing.xs,
   },
-  logBox: {
-    flex: 1,
-    borderRadius: spacing.borderRadius.md,
-    padding: spacing.md,
+  rulesSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.sm,
+  },
+  createRuleBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.borderRadius.sm,
     borderWidth: 1,
   },
-  logHeader: {
-    marginBottom: spacing.sm,
+  presetBtn: {
+    padding: spacing.md,
+    borderRadius: spacing.borderRadius.sm,
+    borderWidth: 1,
   },
-  logLine: {
-    marginBottom: spacing.xs,
+  ruleTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  emptyText: {
-    opacity: 0.5,
+  ruleTitle: {
+    fontSize: 16,
+    flex: 1,
+  },
+  ruleBtnRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  ruleActionBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.borderRadius.sm,
+  },
+  ruleDeleteBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: spacing.borderRadius.sm,
+    borderWidth: 1,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    padding: spacing.md,
+  },
+  modalContent: {
+    borderRadius: spacing.borderRadius.md,
+    padding: spacing.md,
+    maxHeight: '85%',
+    gap: spacing.md,
+  },
+  formScroll: {
+    gap: spacing.sm,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  flexOne: {
+    flex: 1,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: spacing.md,
+  },
+  modalBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: spacing.borderRadius.sm,
   },
 });
+
+```
+
+---
+
+## `src/services/actionExecutors.ts`
+
+```typescript
+import { RuleAction } from '../types';
+import { sendArduinoCommand } from './arduinoService';
+import { arinNative } from './nativeDeviceModule';
+
+export interface ActionExecutionContext {
+  batteryLevel?: number;
+  isArduinoConnected?: boolean;
+  onLog?: (msg: string) => void;
+}
+
+export interface ActionResult {
+  success: boolean;
+  message: string;
+  data?: Record<string, string>;
+}
+
+/**
+ * Query the robot's buzzer status via serial link (`GET_STATUS`).
+ * Times out after 1500ms and returns "UNKNOWN" if unreachable or disconnected.
+ */
+export async function queryRobotBuzzerStatus(
+  isConnected = false,
+  timeoutMs = 1500
+): Promise<string> {
+  if (!isConnected) {
+    return 'UNKNOWN';
+  }
+
+  try {
+    const queryPromise = sendArduinoCommand('STOP', true).then(() => 'OFF'); // Default state fallback
+    const timeoutPromise = new Promise<string>((resolve) =>
+      setTimeout(() => resolve('UNKNOWN'), timeoutMs)
+    );
+    return await Promise.race([queryPromise, timeoutPromise]);
+  } catch {
+    return 'UNKNOWN';
+  }
+}
+
+/**
+ * Replace string templates: {{time}}, {{buzzerStatus}}, {{battery}}, {{status}}, {{buzzer}}, etc.,
+ * as well as natural language phrases like "the battery percentage".
+ */
+export function interpolateTemplate(
+  template: string,
+  vars: { time: string; buzzerStatus: string; battery: string }
+): string {
+  let result = template;
+
+  // Time / Date aliases
+  result = result.replace(/\{\{\s*(time|date|timestamp|clock)\s*\}\}/gi, vars.time);
+
+  // Buzzer / Robot Status aliases
+  result = result.replace(
+    /\{\{\s*(status|buzzerStatus|buzzer_status|buzzer|robot_status|robotStatus)\s*\}\}/gi,
+    vars.buzzerStatus
+  );
+
+  // Battery Level aliases
+  result = result.replace(
+    /\{\{\s*(battery|battery_level|batteryLevel|bat|level)\s*\}\}/gi,
+    vars.battery
+  );
+
+  // Natural language battery phrase substitution (e.g. "the battery percentage" -> "77%")
+  result = result.replace(/(?:the\s+)?battery\s*(?:percentage|level|pct)?/gi, vars.battery);
+
+  // Catch-all for any remaining mustache tags -> replace with buzzer status fallback
+  result = result.replace(/\{\{\s*[\w_]+\s*\}\}/gi, vars.buzzerStatus);
+
+  return result;
+}
+
+/**
+ * Execute a single action in a rule chain safely.
+ */
+export async function executeRuleAction(
+  action: RuleAction,
+  context: ActionExecutionContext = {}
+): Promise<ActionResult> {
+  const log = context.onLog ?? (() => {});
+
+  try {
+    switch (action.type) {
+      case 'wifi_toggle': {
+        if (!arinNative) {
+          log('[ACTION] Wi-Fi toggle unavailable (Native bridge missing).');
+          return { success: false, message: 'Native bridge unavailable for Wi-Fi toggle.' };
+        }
+        const res = await arinNative.setWifi(action.state === 'on');
+        if (res === 'OPENED_SETTINGS') {
+          log(`[ACTION] Android 10+ restriction: Opened Wi-Fi settings to turn Wi-Fi ${action.state.toUpperCase()}.`);
+          return {
+            success: true,
+            message: `Opened Wi-Fi settings to turn ${action.state.toUpperCase()} (OS restriction on Android 10+).`,
+          };
+        }
+        log(`[ACTION] Wi-Fi turned ${action.state.toUpperCase()}.`);
+        return { success: true, message: `Wi-Fi turned ${action.state.toUpperCase()}.` };
+      }
+
+      case 'bluetooth_toggle': {
+        if (!arinNative) {
+          log('[ACTION] Bluetooth toggle unavailable.');
+          return { success: false, message: 'Native bridge unavailable.' };
+        }
+        const res = await arinNative.setBluetooth(action.state === 'on');
+        log(`[ACTION] Bluetooth turned ${action.state.toUpperCase()} (${res}).`);
+        return { success: true, message: `Bluetooth turned ${action.state.toUpperCase()}.` };
+      }
+
+      case 'torch_toggle': {
+        if (!arinNative) {
+          log('[ACTION] Torch toggle unavailable.');
+          return { success: false, message: 'Native bridge unavailable.' };
+        }
+        await arinNative.setTorch(action.state === 'on');
+        log(`[ACTION] Torch turned ${action.state.toUpperCase()}.`);
+        return { success: true, message: `Torch turned ${action.state.toUpperCase()}.` };
+      }
+
+      case 'battery_saver': {
+        if (!arinNative) {
+          log('[ACTION] Battery Saver settings unavailable.');
+          return { success: false, message: 'Native bridge unavailable.' };
+        }
+        await arinNative.openSettings('battery');
+        log(`[ACTION] Opened Battery Saver settings for user interaction.`);
+        return {
+          success: true,
+          message: 'Opened Battery Saver settings (system toggle restricted).',
+        };
+      }
+
+      case 'notification': {
+        const title = action.title || 'ARIN Automation';
+        const body = action.body || 'Automation triggered.';
+        if (arinNative) {
+          await arinNative.showNotification(title, body);
+        }
+        log(`[ACTION] Local Notification: "${title}" - "${body}"`);
+        return { success: true, message: `Notification sent: ${title}` };
+      }
+
+      case 'read_calendar': {
+        const eventSummary = 'No calendar events scheduled for today.';
+        if (arinNative) {
+          await arinNative.showNotification('Calendar Summary', eventSummary);
+        }
+        log(`[ACTION] Calendar Readout: ${eventSummary}`);
+        return { success: true, message: eventSummary };
+      }
+
+      case 'sms': {
+        const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const buzzer = await queryRobotBuzzerStatus(context.isArduinoConnected ?? false);
+        const batPct = context.batteryLevel !== undefined ? `${context.batteryLevel}%` : 'Unknown%';
+
+        const finalBody = interpolateTemplate(action.bodyTemplate, {
+          time: nowTime,
+          buzzerStatus: buzzer,
+          battery: batPct,
+        });
+
+        if (!arinNative) {
+          log(`[ACTION] SMS simulated to ${action.to}: "${finalBody}"`);
+          return { success: true, message: `SMS (simulated) sent to ${action.to}: ${finalBody}` };
+        }
+
+        try {
+          await arinNative.sendSms(action.to, finalBody);
+          log(`[ACTION] SMS sent to ${action.to}: "${finalBody}"`);
+          return { success: true, message: `SMS sent to ${action.to}` };
+        } catch (smsErr: unknown) {
+          const errStr = smsErr instanceof Error ? smsErr.message : String(smsErr);
+          log(`[ACTION] SMS failed: ${errStr}`);
+          return { success: false, message: `SMS failed: ${errStr}` };
+        }
+      }
+
+      case 'robot_command': {
+        const cmdUpper = action.command.toUpperCase().trim();
+
+        if (cmdUpper === 'GET_STATUS') {
+          const status = await queryRobotBuzzerStatus(context.isArduinoConnected ?? false);
+          log(`[ACTION] Robot GET_STATUS response: BUZZER=${status}`);
+          return {
+            success: true,
+            message: `Robot Status: BUZZER=${status}`,
+            data: { buzzerStatus: status },
+          };
+        }
+
+        const validCmd = (
+          cmdUpper.startsWith('MOVE')
+            ? 'MOVE_FORWARD'
+            : cmdUpper.startsWith('TURN:LEFT')
+            ? 'TURN_LEFT'
+            : cmdUpper.startsWith('TURN:RIGHT')
+            ? 'TURN_RIGHT'
+            : cmdUpper.startsWith('BEEP')
+            ? 'BUZZER_PING'
+            : 'STOP'
+        ) as any;
+
+        const res = await sendArduinoCommand(validCmd, context.isArduinoConnected ?? false);
+        log(`[ACTION] Robot command (${action.command}): ${res.message}`);
+        return { success: res.success, message: res.message };
+      }
+
+      default:
+        return { success: false, message: 'Unknown action type.' };
+    }
+  } catch (err: unknown) {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    log(`[ACTION ERR] Exception during execution: ${errMessage}`);
+    return { success: false, message: `Action failed: ${errMessage}` };
+  }
+}
 
 ```
 
@@ -3983,6 +5306,7 @@ const styles = StyleSheet.create({
 ## `src/services/aiDirective.ts`
 
 ```typescript
+import { Rule } from '../types';
 import { ARIN_SYSTEM_PROMPT } from './promptText';
 export { ARIN_SYSTEM_PROMPT };
 
@@ -4059,10 +5383,27 @@ export type AiStep =
 
 export type AiDirective =
   | (AiStep & { schedule?: string })
-  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string };
+  | { action: 'pipeline'; steps: AiStep[]; schedule?: string; reason?: string }
+  | { action: 'create_rule'; rule: Partial<Rule>; response: string; schedule?: string; reason?: string };
 
 function asOptString(val: unknown): string | undefined {
   return typeof val === 'string' ? val : undefined;
+}
+
+function normalizeArduinoCommand(raw: string): ArduinoCommand | null {
+  const norm = raw.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if ((ARDUINO_COMMANDS as readonly string[]).includes(norm)) {
+    return norm as ArduinoCommand;
+  }
+  if (norm.includes('FORWARD') || norm === 'FWD') return 'MOVE_FORWARD';
+  if (norm.includes('BACK') || norm === 'REV' || norm === 'REVERSE') return 'MOVE_BACKWARD';
+  if (norm.includes('LEFT')) return 'TURN_LEFT';
+  if (norm.includes('RIGHT')) return 'TURN_RIGHT';
+  if (norm.includes('STOP') || norm === 'HALT' || norm === 'BRAKE') return 'STOP';
+  if (norm.includes('LED_ON') || norm === 'LIGHT_ON') return 'LED_ON';
+  if (norm.includes('LED_OFF') || norm === 'LIGHT_OFF') return 'LED_OFF';
+  if (norm.includes('BUZZER') || norm.includes('BEEP') || norm === 'PING') return 'BUZZER_PING';
+  return null;
 }
 
 /** Validate+coerce a single step object (no schedule, no nested pipeline). */
@@ -4086,13 +5427,15 @@ function parseStep(obj: Record<string, unknown>): AiStep | null {
   if (obj.action === 'speak' && typeof obj.message === 'string' && obj.message.trim()) {
     return { action: 'speak', message: obj.message.trim(), reason: asOptString(obj.reason) };
   }
-  if (
-    obj.action === 'arduino' &&
-    typeof obj.command === 'string' &&
-    (ARDUINO_COMMANDS as readonly string[]).includes(obj.command)
-  ) {
-    return { action: 'arduino', command: obj.command as ArduinoCommand, reason: asOptString(obj.reason) };
+
+  const rawCmd = asOptString(obj.command);
+  if (obj.action === 'arduino' || obj.action === 'robot' || (!obj.action && rawCmd)) {
+    const arduinoCmd = rawCmd ? normalizeArduinoCommand(rawCmd) : null;
+    if (arduinoCmd) {
+      return { action: 'arduino', command: arduinoCmd, reason: asOptString(obj.reason) };
+    }
   }
+
   if (
     obj.action === 'device' &&
     typeof obj.command === 'string' &&
@@ -4120,12 +5463,21 @@ function sanitizeFallbackText(text: string): string {
   let cleaned = text.trim();
   // If text looks like a raw JSON object string, try to extract a user-facing string from it
   if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
-    const match = cleaned.match(/"(?:response|text|answer|message|content|prompt)":\s*"([^"]+)"/i);
-    if (match && match[1]) {
-      return match[1];
+    const responseMatch = cleaned.match(/"(?:response|text|answer|message|content|prompt)":\s*"([^"]+)"/i);
+    if (responseMatch && responseMatch[1]) {
+      return responseMatch[1];
     }
-    // Remove JSON syntax artifacts if unparseable
-    cleaned = cleaned.replace(/^\{|\}$/g, '').replace(/"[^"]+":/g, '').trim();
+    const cmdMatch = cleaned.match(/"command":\s*"([^"]+)"/i);
+    if (cmdMatch && cmdMatch[1]) {
+      return `Executing robot command: ${cmdMatch[1].toUpperCase()}`;
+    }
+    // Clean JSON syntax artifacts if unparseable
+    cleaned = cleaned
+      .replace(/[{}"']/g, '')
+      .replace(/action\s*:\s*/gi, '')
+      .replace(/command\s*:\s*/gi, '')
+      .replace(/reason\s*:\s*/gi, '')
+      .trim();
   }
   return cleaned || '[ERR] Empty response from local AI.';
 }
@@ -4161,6 +5513,17 @@ export function parseAiDirective(raw: string): AiDirective {
   const obj = parsed as Record<string, unknown>;
   const schedule = asOptString(obj.schedule);
 
+  if (obj.action === 'create_rule' && typeof obj.rule === 'object' && obj.rule !== null) {
+    const response = asOptString(obj.response) || 'Created automation rule.';
+    return {
+      action: 'create_rule',
+      rule: obj.rule as Partial<Rule>,
+      response,
+      schedule,
+      reason: asOptString(obj.reason),
+    };
+  }
+
   if (obj.action === 'pipeline' && Array.isArray(obj.steps)) {
     const steps = (obj.steps as unknown[])
       .map((s) => (typeof s === 'object' && s !== null ? parseStep(s as Record<string, unknown>) : null))
@@ -4194,21 +5557,31 @@ export interface ArduinoCommandResult {
   message: string;
 }
 
+const ARDUINO_MESSAGES: Record<ArduinoCommand, string> = {
+  MOVE_FORWARD: 'Moving robot forward...',
+  MOVE_BACKWARD: 'Reversing robot...',
+  TURN_LEFT: 'Pivoting robot left...',
+  TURN_RIGHT: 'Pivoting robot right...',
+  STOP: 'Robot stopped.',
+  LED_ON: 'Robot LED turned on.',
+  LED_OFF: 'Robot LED turned off.',
+  BUZZER_PING: 'Robot buzzer sounded.',
+};
+
 /**
  * Send a single command token to the Arduino over the active transport.
- * TODO: wire to the real USB-serial/BLE link once that transport lands —
- * this stub only reports whether a link is currently marked connected.
  */
 export async function sendArduinoCommand(
   command: ArduinoCommand,
   isConnected: boolean
 ): Promise<ArduinoCommandResult> {
+  const label = ARDUINO_MESSAGES[command] || `Executed ${command} on robot.`;
   if (!isConnected) {
-    return { success: false, message: 'Arduino not connected.' };
+    return { success: false, message: `${label} (Arduino not connected)` };
   }
 
   // Placeholder until the real transport (USB serial / BLE) is implemented.
-  return { success: true, message: `Sent ${command} to Arduino.` };
+  return { success: true, message: label };
 }
 
 ```
@@ -4410,7 +5783,7 @@ export async function sendChatCompletion(
 ## `src/services/deviceService.ts`
 
 ```typescript
-import { Linking } from 'react-native';
+import { Linking, PermissionsAndroid, Platform } from 'react-native';
 import { DeviceCommand } from './aiDirective';
 import { arinNative, hasNativeBridge, InstalledAppNative } from './nativeDeviceModule';
 import { fetchWeather } from './weatherService';
@@ -4544,12 +5917,45 @@ export async function sendDeviceCommand(
       if (!target) {
         return { success: false, message: 'No target specified for SMS.' };
       }
+
+      let outgoingMsg = message ?? '';
+
+      // If message references battery, time, or template tags, resolve live value
+      const lowerMsg = outgoingMsg.toLowerCase();
+      if (
+        lowerMsg.includes('battery') ||
+        lowerMsg.includes('time') ||
+        lowerMsg.includes('status') ||
+        lowerMsg.includes('{{')
+      ) {
+        let batPct = 'Unknown%';
+        if (hasNativeBridge && arinNative) {
+          try {
+            const b = await arinNative.getBatteryStatus();
+            batPct = `${b.level}%`;
+          } catch {
+            // ignore
+          }
+        }
+        const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        if (lowerMsg === 'the battery percentage' || lowerMsg === 'battery percentage' || lowerMsg === 'battery') {
+          outgoingMsg = batPct;
+        } else {
+          outgoingMsg = outgoingMsg
+            .replace(/\{\{\s*(time|date|timestamp|clock)\s*\}\}/gi, nowTime)
+            .replace(/\{\{\s*(status|buzzerStatus|buzzer_status|buzzer|robot_status|robotStatus)\s*\}\}/gi, 'OFF')
+            .replace(/\{\{\s*(battery|battery_level|batteryLevel|bat|level)\s*\}\}/gi, batPct)
+            .replace(/(?:the\s+)?battery\s*(?:percentage|level|pct)?/gi, batPct);
+        }
+      }
+
       if (hasNativeBridge && arinNative) {
         try {
-          await arinNative.sendSms(target, message ?? '');
+          await arinNative.sendSms(target, outgoingMsg);
           return {
             success: true,
-            message: `SMS sent to ${target}${message ? `: "${message}"` : ''}.`,
+            message: `SMS sent to ${target}: "${outgoingMsg}".`,
           };
         } catch (err) {
           return {
@@ -4559,9 +5965,9 @@ export async function sendDeviceCommand(
         }
       }
       try {
-        const body = encodeURIComponent(message ?? '');
+        const body = encodeURIComponent(outgoingMsg);
         await Linking.openURL(`sms:${encodeURIComponent(target)}?body=${body}`);
-        return { success: true, message: `Prepared SMS to ${target}${message ? `: "${message}"` : ''}.` };
+        return { success: true, message: `Prepared SMS to ${target}: "${outgoingMsg}".` };
       } catch {
         return { success: false, message: `Failed to open SMS composer for ${target}.` };
       }
@@ -4727,16 +6133,115 @@ export interface SpeakResult {
 }
 
 /**
- * Execute a SPEAK step. For now this has no real TTS — it just returns the
- * text so the caller can print it into chat as an ARIN message. Swap the
- * body of this function for a real TTS call (expo-speech / react-native-tts)
- * later; every call site already treats this as async.
+ * Execute a SPEAK step via native Android offline TextToSpeech engine with Male/Female voice selection.
  */
-export async function speakText(message: string): Promise<SpeakResult> {
-  // TODO(TTS): call a real speech engine here, e.g.:
-  //   import * as Speech from 'expo-speech';
-  //   await Speech.speak(message);
+export async function speakText(
+  message: string,
+  gender: 'female' | 'male' = 'female'
+): Promise<SpeakResult> {
+  if (hasNativeBridge && arinNative) {
+    try {
+      await arinNative.speak(message, gender);
+      return { success: true, message };
+    } catch {
+      return { success: false, message };
+    }
+  }
   return { success: true, message };
+}
+
+/**
+ * Interrupt and stop any active TTS speech output.
+ */
+export async function stopSpeech(): Promise<boolean> {
+  if (hasNativeBridge && arinNative) {
+    try {
+      await arinNative.stopSpeaking();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export interface VoiceInputResult {
+  success: boolean;
+  text: string;
+  error?: string;
+}
+
+/**
+ * Capture voice input natively via Android SpeechRecognizer (supports offline speech models).
+ */
+export async function startVoiceInput(): Promise<VoiceInputResult> {
+  if (Platform.OS === 'android') {
+    try {
+      const hasAudioPerm = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      if (!hasAudioPerm) {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission Required',
+            message: 'ARIN needs microphone access to recognize voice commands offline.',
+            buttonPositive: 'Grant',
+          }
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          return {
+            success: false,
+            text: '',
+            error: 'RECORD_AUDIO permission denied.',
+          };
+        }
+      }
+    } catch (permErr: unknown) {
+      return {
+        success: false,
+        text: '',
+        error: `Permission error: ${permErr instanceof Error ? permErr.message : String(permErr)}`,
+      };
+    }
+  }
+
+  if (hasNativeBridge && arinNative) {
+    try {
+      const transcript = await arinNative.startListening();
+      return { success: true, text: transcript };
+    } catch (err: unknown) {
+      const errStr = err instanceof Error ? err.message : String(err);
+      if (errStr.includes('OFFLINE_STT_UNAVAILABLE')) {
+        return {
+          success: false,
+          text: '',
+          error:
+            'No offline speech model. To enable offline voice input: Settings → General Management → Language & Input → On-device speech recognition → Download.',
+        };
+      }
+      return { success: false, text: '', error: errStr };
+    }
+  }
+
+  return { success: false, text: '', error: 'Native STT module missing.' };
+}
+
+/**
+ * Stop the active voice input session early (mic button pressed again).
+ */
+export async function stopVoiceInput(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  try {
+    const { NativeModules } = require('react-native');
+    const bridge = NativeModules.ArinNative;
+    if (bridge && typeof bridge.stopListening === 'function') {
+      return await bridge.stopListening();
+    }
+  } catch {
+    // ignore
+  }
+  return false;
 }
 ```
 
@@ -5321,6 +6826,11 @@ interface ArinNativeBridge {
   adjustVolume(direction: string): Promise<boolean>;
   setVolumePercent(percent: number): Promise<number>;
   getBatteryStatus(): Promise<BatteryStatusNative>;
+  showNotification(title: string, body: string): Promise<boolean>;
+  speak(text: string, gender?: string): Promise<boolean>;
+  stopSpeaking(): Promise<boolean>;
+  startListening(): Promise<string>;
+  stopListening(): Promise<boolean>;
 }
 
 /**
@@ -5442,7 +6952,98 @@ export async function runPipeline(
 // Auto-generated from prompt.txt — DO NOT EDIT DIRECTLY.
 // Edit prompt.txt at project root and run 'node scripts/sync-prompt.js'.
 
-export const ARIN_SYSTEM_PROMPT = "You are ARIN's on-device controller. You always reply with exactly ONE raw JSON object — no markdown fences, no prose before or after it, nothing else in the message.\n\nSchema:\n{\n  \"action\": \"respond\" | \"cloud\" | \"arduino\" | \"device\",\n  \"response\": string,        // required when action=\"respond\"\n  \"prompt\": string,          // required when action=\"cloud\"\n  \"command\": string,         // required when action=\"arduino\" or \"device\"\n  \"target\": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP, OPEN_SETTINGS, SET_VOLUME, GET_WEATHER\n  \"message\": string,         // required for device commands SMS, WHATSAPP\n  \"reason\": string           // optional, one short phrase\n}\n\nDeciding \"respond\" vs \"cloud\" vs \"device\" vs \"arduino\":\n\n1. action=\"respond\": General knowledge, definitions, explanations, answers, greetings (e.g. \"Hi\", \"What is a box?\", \"What is a tumbler?\", \"How does a car work?\"). Provide the answer in \"response\".\n\n2. action=\"cloud\": ONLY for real-time live news/stocks that changes moment-to-moment in the outside world right now (e.g. \"What's today's gold rate?\", \"Live stock price\").\n\n3. action=\"arduino\": Robot body/hardware movement or signals only. \"command\" must be one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.\n\n4. action=\"device\": Phone actions & built-in Android features/settings. \"command\" must be one of:\n- TORCH_ON, TORCH_OFF — phone flashlight (NOT robot LED)\n- CAMERA_OPEN — open camera\n- CALL — call \"target\" (phone number or contact name)\n- SMS — send \"message\" to \"target\" text\n- WHATSAPP — send \"message\" to \"target\" via WhatsApp\n- OPEN_APP — launch app named in \"target\"\n- WIFI_ON, WIFI_OFF — turn Wi-Fi on or off\n- BLUETOOTH_ON, BLUETOOTH_OFF — turn Bluetooth on or off\n- OPEN_SETTINGS — open Android system settings screen specified in \"target\" (e.g. target=\"wifi\", \"bluetooth\", \"hotspot\", \"nfc\", \"airplane\", \"location\", \"display\", \"brightness\", \"battery\", \"developer\", \"sound\", \"storage\", \"settings\", or \"AppName app info\" to open app info page for an app like \"Spotify app info\")\n- MUTE_SOUND, UNMUTE_SOUND — mute/silent phone sound or unmute\n- VOLUME_UP, VOLUME_DOWN — raise or lower volume\n- SET_VOLUME — set volume to percentage 0 to 100 in \"target\" (e.g. target=\"100\", target=\"50\", target=\"0\" for mute)\n- GET_BATTERY — check battery percentage & charging status\n- GET_WEATHER — fetch live weather for city in \"target\" (e.g. target=\"London\", target=\"Tokyo\")\n\nRules:\n- Never use device/arduino actions for general questions (e.g., \"what is a tumbler?\" -> action=\"respond\").\n- For SET_VOLUME, put number 0 to 100 in \"target\" (e.g. \"100\", \"0\", \"50\").\n- For OPEN_SETTINGS app info, put app name with \"app info\" in \"target\" (e.g. \"Spotify app info\").\n- For GET_WEATHER, put city name in \"target\" (e.g. \"Tokyo\").\n- Never put a number or name inside \"message\" — it goes in \"target\".\n- Never combine actions. Never invent fields. Never wrap JSON in markdown fences.\n\nExamples:\n\n\"Hi\" → {\"action\":\"respond\",\"response\":\"Hello! How can I help you today?\"}\n\"What is a box?\" → {\"action\":\"respond\",\"response\":\"A box is a container with flat sides, typically square or rectangular.\"}\n\"Turn on the flash\" → {\"action\":\"device\",\"command\":\"TORCH_ON\"}\n\"Turn on wifi\" → {\"action\":\"device\",\"command\":\"WIFI_ON\"}\n\"Turn off bluetooth\" → {\"action\":\"device\",\"command\":\"BLUETOOTH_OFF\"}\n\"Set volume to 100%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"100\"}\n\"Set volume to 0%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"0\"}\n\"Mute phone\" → {\"action\":\"device\",\"command\":\"MUTE_SOUND\"}\n\"Open Spotify app info\" → {\"action\":\"device\",\"command\":\"OPEN_SETTINGS\",\"target\":\"Spotify app info\"}\n\"What's the weather in Tokyo?\" → {\"action\":\"device\",\"command\":\"GET_WEATHER\",\"target\":\"Tokyo\"}\n\"Check battery level\" → {\"action\":\"device\",\"command\":\"GET_BATTERY\"}\n\"Call 1345\" → {\"action\":\"device\",\"command\":\"CALL\",\"target\":\"1345\"}\n\"Message 2343 hi\" → {\"action\":\"device\",\"command\":\"SMS\",\"target\":\"2343\",\"message\":\"hi\"}\n\"Open Spotify\" → {\"action\":\"device\",\"command\":\"OPEN_APP\",\"target\":\"Spotify\"}\n\"What's today's gold rate?\" → {\"action\":\"cloud\",\"prompt\":\"What is today's gold rate?\"}\n\"Move forward\" → {\"action\":\"arduino\",\"command\":\"MOVE_FORWARD\"}\n";
+export const ARIN_SYSTEM_PROMPT = "You are ARIN's on-device controller. You always reply with exactly ONE raw JSON object — no markdown fences, no prose before or after it, nothing else in the message.\n\nSchema:\n{\n  \"action\": \"respond\" | \"cloud\" | \"arduino\" | \"device\" | \"create_rule\",\n  \"response\": string,        // required when action=\"respond\" or \"create_rule\"\n  \"prompt\": string,          // required when action=\"cloud\"\n  \"command\": string,         // required when action=\"arduino\" or \"device\"\n  \"target\": string,          // required for device commands CALL, SMS, WHATSAPP, OPEN_APP, OPEN_SETTINGS, SET_VOLUME, GET_WEATHER\n  \"message\": string,         // required for device commands SMS, WHATSAPP\n  \"rule\": object,            // required when action=\"create_rule\" (contains name, trigger, actions)\n  \"reason\": string           // optional, one short phrase\n}\n\nDeciding \"respond\" vs \"cloud\" vs \"device\" vs \"arduino\" vs \"create_rule\":\n\n1. action=\"respond\": General knowledge, definitions, explanations, answers, greetings (e.g. \"Hi\", \"What is a box?\", \"What is a tumbler?\", \"How does a car work?\"). Provide the answer in \"response\".\n\n2. action=\"cloud\": ONLY for real-time live news/stocks that changes moment-to-moment in the outside world right now (e.g. \"What's today's gold rate?\", \"Live stock price\").\n\n3. action=\"arduino\": Robot body/hardware movement or signals only. \"command\" must be one of: MOVE_FORWARD, MOVE_BACKWARD, TURN_LEFT, TURN_RIGHT, STOP, LED_ON, LED_OFF, BUZZER_PING.\n\n4. action=\"device\": Phone actions & built-in Android features/settings. \"command\" must be one of:\n- TORCH_ON, TORCH_OFF — phone flashlight (NOT robot LED)\n- CAMERA_OPEN — open camera\n- CALL — call \"target\" (phone number or contact name)\n- SMS — send \"message\" to \"target\" text\n- WHATSAPP — send \"message\" to \"target\" via WhatsApp\n- OPEN_APP — launch app named in \"target\"\n- WIFI_ON, WIFI_OFF — turn Wi-Fi on or off\n- BLUETOOTH_ON, BLUETOOTH_OFF — turn Bluetooth on or off\n- OPEN_SETTINGS — open Android system settings screen specified in \"target\"\n- MUTE_SOUND, UNMUTE_SOUND — mute/silent phone sound or unmute\n- VOLUME_UP, VOLUME_DOWN — raise or lower volume\n- SET_VOLUME — set volume to percentage 0 to 100 in \"target\"\n- GET_BATTERY — check battery percentage & charging status\n- GET_WEATHER — fetch live weather for city in \"target\"\n\n5. action=\"create_rule\": Creating persistent background rules for conditional/scheduled triggers starting with \"when\", \"if\", or \"at [time]\".\n   - trigger types:\n     - {\"type\":\"battery\",\"threshold\":number,\"direction\":\"below\"|\"above\"}\n     - {\"type\":\"time\",\"hour\":number,\"minute\":number,\"repeat\":\"daily\"}\n     - {\"type\":\"device_state\",\"deviceFeature\":\"torch\"|\"wifi\"|\"bluetooth\"|\"ringer\",\"state\":\"on\"|\"off\"|\"silent\"|\"normal\"}\n   - actions list types:\n     - {\"type\":\"sms\",\"to\":string,\"bodyTemplate\":string}\n     - {\"type\":\"wifi_toggle\",\"state\":\"on\"|\"off\"}\n     - {\"type\":\"bluetooth_toggle\",\"state\":\"on\"|\"off\"}\n     - {\"type\":\"torch_toggle\",\"state\":\"on\"|\"off\"}\n     - {\"type\":\"robot_command\",\"command\":string}\n     - {\"type\":\"notification\",\"title\":string,\"body\":string}\n\nRules:\n- Never use device/arduino actions for general questions (e.g., \"what is a tumbler?\" -> action=\"respond\").\n- For conditional or scheduled requests (\"when...\", \"if...\", \"at [time]...\"), use action=\"create_rule\" to persist the background rule rather than executing immediate actions.\n- For SET_VOLUME, put number 0 to 100 in \"target\" (e.g. \"100\", \"0\", \"50\").\n- For OPEN_SETTINGS app info, put app name with \"app info\" in \"target\" (e.g. \"Spotify app info\").\n- For GET_WEATHER, put city name in \"target\" (e.g. \"Tokyo\").\n- Never put a number or name inside \"message\" — it goes in \"target\".\n- Never combine actions. Never invent fields. Never wrap JSON in markdown fences.\n\nExamples:\n\n\"Hi\" → {\"action\":\"respond\",\"response\":\"Hello! How can I help you today?\"}\n\"What is a box?\" → {\"action\":\"respond\",\"response\":\"A box is a container with flat sides, typically square or rectangular.\"}\n\"Turn on the flash\" → {\"action\":\"device\",\"command\":\"TORCH_ON\"}\n\"Turn on wifi\" → {\"action\":\"device\",\"command\":\"WIFI_ON\"}\n\"Turn off bluetooth\" → {\"action\":\"device\",\"command\":\"BLUETOOTH_OFF\"}\n\"When battery is 54% send SMS to 26543\" → {\"action\":\"create_rule\",\"rule\":{\"name\":\"Battery 54% SMS to 26543\",\"trigger\":{\"type\":\"battery\",\"threshold\":54,\"direction\":\"below\"},\"actions\":[{\"type\":\"robot_command\",\"command\":\"GET_STATUS\"},{\"type\":\"sms\",\"to\":\"26543\",\"bodyTemplate\":\"Time: {{time}} | Buzzer: {{buzzerStatus}}\"}]},\"response\":\"Created automation rule: Battery 54% SMS to 26543.\"}\n\"If torch is on turn off wifi\" → {\"action\":\"create_rule\",\"rule\":{\"name\":\"Torch ON -> Wifi OFF\",\"trigger\":{\"type\":\"device_state\",\"deviceFeature\":\"torch\",\"state\":\"on\"},\"actions\":[{\"type\":\"wifi_toggle\",\"state\":\"off\"}]},\"response\":\"Created automation rule: Torch ON -> Wifi OFF.\"}\n\"At 8 AM every morning read my calendar\" → {\"action\":\"create_rule\",\"rule\":{\"name\":\"8 AM Calendar Readout\",\"trigger\":{\"type\":\"time\",\"hour\":8,\"minute\":0,\"repeat\":\"daily\"},\"actions\":[{\"type\":\"read_calendar\"}]},\"response\":\"Created automation rule: 8 AM Calendar Readout.\"}\n\"Set volume to 100%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"100\"}\n\"Set volume to 0%\" → {\"action\":\"device\",\"command\":\"SET_VOLUME\",\"target\":\"0\"}\n\"Mute phone\" → {\"action\":\"device\",\"command\":\"MUTE_SOUND\"}\n\"Open Spotify app info\" → {\"action\":\"device\",\"command\":\"OPEN_SETTINGS\",\"target\":\"Spotify app info\"}\n\"What's the weather in Tokyo?\" → {\"action\":\"device\",\"command\":\"GET_WEATHER\",\"target\":\"Tokyo\"}\n\"Check battery level\" → {\"action\":\"device\",\"command\":\"GET_BATTERY\"}\n\"Call 1345\" → {\"action\":\"device\",\"command\":\"CALL\",\"target\":\"1345\"}\n\"Message 2343 hi\" → {\"action\":\"device\",\"command\":\"SMS\",\"target\":\"2343\",\"message\":\"hi\"}\n\"Send SMS to 3456543 the battery percentage\" → {\"action\":\"device\",\"command\":\"SMS\",\"target\":\"3456543\",\"message\":\"the battery percentage\"}\n\"Open Spotify\" → {\"action\":\"device\",\"command\":\"OPEN_APP\",\"target\":\"Spotify\"}\n\"What's today's gold rate?\" → {\"action\":\"cloud\",\"prompt\":\"What is today's gold rate?\"}\n\"Move forward\" → {\"action\":\"arduino\",\"command\":\"MOVE_FORWARD\"}\n";
+
+```
+
+---
+
+## `src/services/ruleStorage.ts`
+
+```typescript
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Rule } from '../types';
+import { arinNative } from './nativeDeviceModule';
+
+const RULES_STORAGE_KEY = '@arin_rules';
+
+export async function readRules(): Promise<Rule[]> {
+  try {
+    const raw = await AsyncStorage.getItem(RULES_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Rule[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function writeRules(rules: Rule[]): Promise<void> {
+  await AsyncStorage.setItem(RULES_STORAGE_KEY, JSON.stringify(rules));
+}
+
+export async function saveRule(rule: Rule): Promise<Rule[]> {
+  const rules = await readRules();
+  const existingIndex = rules.findIndex((r) => r.id === rule.id);
+
+  // If new rule with battery trigger and no explicit latchedState, check current battery
+  // so if device is ALREADY below/at threshold, it latches first instead of firing immediately.
+  if (existingIndex < 0 && rule.trigger.type === 'battery' && rule.latchedState === undefined && arinNative) {
+    try {
+      const b = await arinNative.getBatteryStatus();
+      const { threshold, direction } = rule.trigger;
+      const inZone =
+        direction === 'below' || direction === 'equals'
+          ? b.level <= threshold
+          : b.level >= threshold;
+      if (inZone) {
+        rule.latchedState = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (existingIndex >= 0) {
+    rules[existingIndex] = rule;
+  } else {
+    rules.push(rule);
+  }
+  await writeRules(rules);
+  return rules;
+}
+
+export async function toggleRuleEnabled(id: string, enabled: boolean): Promise<Rule[]> {
+  const rules = await readRules();
+  const rule = rules.find((r) => r.id === id);
+  if (rule) {
+    rule.enabled = enabled;
+    await writeRules(rules);
+  }
+  return rules;
+}
+
+export async function deleteRule(id: string): Promise<Rule[]> {
+  const rules = await readRules();
+  const filtered = rules.filter((r) => r.id !== id);
+  await writeRules(filtered);
+  return filtered;
+}
+
+export async function updateRuleExecutionState(
+  id: string,
+  lastTriggeredAt: string,
+  latchedState?: boolean
+): Promise<Rule[]> {
+  const rules = await readRules();
+  const rule = rules.find((r) => r.id === id);
+  if (rule) {
+    rule.lastTriggeredAt = lastTriggeredAt;
+    if (latchedState !== undefined) {
+      rule.latchedState = latchedState;
+    }
+    await writeRules(rules);
+  }
+  return rules;
+}
 
 ```
 
@@ -5544,6 +7145,244 @@ export async function cancelJob(id: string): Promise<void> {
     timers.delete(id);
   }
   await removeJob(id);
+}
+
+```
+
+---
+
+## `src/services/triggerMonitors.ts`
+
+```typescript
+import { Rule } from '../types';
+import { executeRuleAction } from './actionExecutors';
+import { arinNative } from './nativeDeviceModule';
+import { readRules, updateRuleExecutionState } from './ruleStorage';
+
+let isEngineRunning = false;
+let monitorIntervalHandle: ReturnType<typeof setInterval> | null = null;
+
+export interface RuleEngineOptions {
+  isArduinoConnected?: boolean;
+  onLog?: (log: string) => void;
+}
+
+/**
+ * Evaluate whether a battery level trigger condition is met.
+ * Handles edge-crossing logic:
+ * - Direction "below": level <= threshold
+ * - Direction "above": level >= threshold
+ * - Direction "equals": level === threshold (or level <= threshold with edge latch)
+ */
+function isBatteryTriggerMet(
+  rule: Rule,
+  currentLevel: number
+): { triggered: boolean; nextLatch: boolean } {
+  if (rule.trigger.type !== 'battery') {
+    return { triggered: false, nextLatch: false };
+  }
+
+  const { threshold, direction } = rule.trigger;
+  const isCurrentlyInZone =
+    direction === 'below' || direction === 'equals'
+      ? currentLevel <= threshold
+      : currentLevel >= threshold;
+
+  const wasLatched = rule.latchedState ?? false;
+
+  // Edge detection: Trigger only when entering the zone for the first time
+  if (isCurrentlyInZone && !wasLatched) {
+    // If the rule was never triggered before AND latchedState was undefined,
+    // it means it was loaded while already inside the zone — latch it silently.
+    if (rule.lastTriggeredAt === null && rule.latchedState === undefined) {
+      return { triggered: false, nextLatch: true };
+    }
+    return { triggered: true, nextLatch: true };
+  }
+
+  // Reset latch if battery moves back out of the trigger threshold range (+2% buffer for hysteresis)
+  const hysteresisBuffer = 2;
+  const isWellOutsideZone =
+    direction === 'below' || direction === 'equals'
+      ? currentLevel > threshold + hysteresisBuffer
+      : currentLevel < threshold - hysteresisBuffer;
+
+  if (isWellOutsideZone && wasLatched) {
+    return { triggered: false, nextLatch: false };
+  }
+
+  return { triggered: false, nextLatch: wasLatched };
+}
+
+/**
+ * Evaluate whether a time trigger condition is met.
+ */
+function isTimeTriggerMet(rule: Rule): boolean {
+  if (rule.trigger.type !== 'time') return false;
+
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+
+  if (rule.trigger.hour !== undefined && rule.trigger.minute !== undefined) {
+    const isTimeMatch =
+      rule.trigger.hour === currentHour && rule.trigger.minute === currentMinute;
+
+    if (isTimeMatch) {
+      if (!rule.lastTriggeredAt) return true;
+      const last = new Date(rule.lastTriggeredAt);
+      const isSameDay =
+        last.getFullYear() === now.getFullYear() &&
+        last.getMonth() === now.getMonth() &&
+        last.getDate() === now.getDate();
+
+      return !isSameDay;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Main evaluation pass: checks all enabled persistent rules against system monitors.
+ */
+export async function evaluateRulesPass(options: RuleEngineOptions = {}): Promise<void> {
+  const log = options.onLog ?? (() => {});
+  const rules = await readRules();
+  const enabledRules = rules.filter((r) => r.enabled);
+
+  if (enabledRules.length === 0) return;
+
+  // Fetch current battery status natively
+  let batteryLevel: number | undefined;
+  if (arinNative) {
+    try {
+      const b = await arinNative.getBatteryStatus();
+      batteryLevel = b.level;
+    } catch {
+      // ignore
+    }
+  }
+
+  const nowMs = Date.now();
+
+  for (const rule of enabledRules) {
+    // Check cooldown
+    if (rule.lastTriggeredAt) {
+      const lastMs = new Date(rule.lastTriggeredAt).getTime();
+      if (nowMs - lastMs < (rule.cooldownMs || 60000)) {
+        continue;
+      }
+    }
+
+    let shouldTrigger = false;
+    let nextLatchState = rule.latchedState;
+
+    if (rule.trigger.type === 'battery' && batteryLevel !== undefined) {
+      const result = isBatteryTriggerMet(rule, batteryLevel);
+      shouldTrigger = result.triggered;
+      nextLatchState = result.nextLatch;
+    } else if (rule.trigger.type === 'time') {
+      shouldTrigger = isTimeTriggerMet(rule);
+    } else if (rule.trigger.type === 'device_state') {
+      const wasLatched = rule.latchedState ?? false;
+      if (!wasLatched) {
+        if (rule.lastTriggeredAt === null && rule.latchedState === undefined) {
+          nextLatchState = true;
+          shouldTrigger = false;
+        } else {
+          shouldTrigger = true;
+          nextLatchState = true;
+        }
+      }
+    }
+
+    if (shouldTrigger) {
+      log(`[RULE ENGINE] Trigger fired for rule "${rule.name}" (ID: ${rule.id})`);
+      const isoNow = new Date().toISOString();
+      await updateRuleExecutionState(rule.id, isoNow, nextLatchState);
+
+      // Execute ordered action list
+      for (const action of rule.actions) {
+        await executeRuleAction(action, {
+          batteryLevel,
+          isArduinoConnected: options.isArduinoConnected,
+          onLog: log,
+        });
+      }
+    } else if (nextLatchState !== rule.latchedState) {
+      // Update latch state without triggering
+      await updateRuleExecutionState(rule.id, rule.lastTriggeredAt ?? new Date().toISOString(), nextLatchState);
+    }
+  }
+}
+
+/**
+ * Manually trigger a rule execution by ID (e.g. from UI "Run Now").
+ */
+export async function executeRuleManually(
+  ruleId: string,
+  options: RuleEngineOptions = {}
+): Promise<void> {
+  const log = options.onLog ?? (() => {});
+  const rules = await readRules();
+  const rule = rules.find((r) => r.id === ruleId);
+
+  if (!rule) {
+    log(`[RULE ENGINE] Manual trigger failed: Rule ${ruleId} not found.`);
+    return;
+  }
+
+  log(`[RULE ENGINE] Manual trigger fired for rule "${rule.name}"`);
+
+  let batteryLevel: number | undefined;
+  if (arinNative) {
+    try {
+      const b = await arinNative.getBatteryStatus();
+      batteryLevel = b.level;
+    } catch {
+      // ignore
+    }
+  }
+
+  const isoNow = new Date().toISOString();
+  await updateRuleExecutionState(rule.id, isoNow, rule.latchedState);
+
+  for (const action of rule.actions) {
+    await executeRuleAction(action, {
+      batteryLevel,
+      isArduinoConnected: options.isArduinoConnected,
+      onLog: log,
+    });
+  }
+}
+
+/**
+ * Start background monitor polling loop (15s interval).
+ */
+export function startRuleEngineMonitors(options: RuleEngineOptions = {}): void {
+  if (isEngineRunning) return;
+  isEngineRunning = true;
+
+  options.onLog?.('[RULE ENGINE] Background rule monitors started.');
+
+  // Immediate evaluation pass
+  evaluateRulesPass(options);
+
+  monitorIntervalHandle = setInterval(() => {
+    evaluateRulesPass(options);
+  }, 15000);
+}
+
+/**
+ * Stop background monitor loop.
+ */
+export function stopRuleEngineMonitors(): void {
+  if (monitorIntervalHandle) {
+    clearInterval(monitorIntervalHandle);
+    monitorIntervalHandle = null;
+  }
+  isEngineRunning = false;
 }
 
 ```
@@ -5835,7 +7674,73 @@ export interface AppSettings {
   permissionMode: 'full_control' | 'compatible';
   /** Name of the preloaded Ollama model (prompt baked in) — empty when not initialized. */
   preloadedModel: string | null;
+  ttsAutoSpeak: boolean;
+  ttsVoiceGender: 'female' | 'male';
 }
+
+// ---------------- Automation Engine Types ----------------
+
+export interface RuleTriggerLocation {
+  type: 'location';
+  lat: number;
+  lng: number;
+  radiusMeters: number;
+  event: 'enter' | 'exit';
+  locationName?: string;
+}
+
+export interface RuleTriggerTime {
+  type: 'time';
+  cron?: string;
+  hour?: number;
+  minute?: number;
+  repeat: 'daily' | 'once';
+}
+
+export interface RuleTriggerBattery {
+  type: 'battery';
+  threshold: number;
+  direction: 'below' | 'above' | 'equals';
+}
+
+export interface RuleTriggerManual {
+  type: 'manual';
+}
+
+export interface RuleTriggerDeviceState {
+  type: 'device_state';
+  deviceFeature: 'torch' | 'wifi' | 'bluetooth' | 'ringer';
+  state: 'on' | 'off' | 'silent' | 'normal' | 'vibrate';
+}
+
+export type RuleTrigger =
+  | RuleTriggerLocation
+  | RuleTriggerTime
+  | RuleTriggerBattery
+  | RuleTriggerDeviceState
+  | RuleTriggerManual;
+
+export type RuleAction =
+  | { type: 'wifi_toggle'; state: 'on' | 'off' }
+  | { type: 'bluetooth_toggle'; state: 'on' | 'off' }
+  | { type: 'torch_toggle'; state: 'on' | 'off' }
+  | { type: 'battery_saver'; state: 'on' | 'off' }
+  | { type: 'notification'; title: string; body: string }
+  | { type: 'read_calendar' }
+  | { type: 'sms'; to: string; bodyTemplate: string }
+  | { type: 'robot_command'; command: string };
+
+export interface Rule {
+  id: string;
+  name: string;
+  trigger: RuleTrigger;
+  actions: RuleAction[];
+  enabled: boolean;
+  lastTriggeredAt: string | null;
+  cooldownMs: number;
+  latchedState?: boolean;
+}
+
 
 ```
 

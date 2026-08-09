@@ -89,6 +89,7 @@ void setup() {
  *  STOP                      Stop both motors             OK:STOP
  *  BEEP:<duration_ms>        Pulse buzzer for duration    OK:BEEP:<duration>
  *  GET_DISTANCE              Ping ultrasonic sensor       DIST:<cm>
+ *  GET_STATUS                Query robot buzzer state     STATUS:BUZZER=<ON|OFF>
  * 
  * Safety Responses (Edge-triggered, non-blocking):
  *  - OBSTACLE:<cm>  Sent ONCE when obstacle (<20cm) stops moving robot
@@ -207,6 +208,10 @@ void processCommand(char* cmdLine) {
     long dist = readDistanceCm();
     Serial.print("DIST:");
     Serial.println(dist);
+  }
+  else if (strcmp(copy, "GET_STATUS") == 0) {
+    Serial.print("STATUS:BUZZER=");
+    Serial.println(buzzerActive ? "ON" : "OFF");
   }
   else {
     Serial.print("ERR:UNKNOWN_CMD:");

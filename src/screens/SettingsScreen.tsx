@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { StatusBadge } from '../components/StatusBadge';
 import { useApp } from '../context/AppContext';
+import { arinNative, UsbDeviceInfo } from '../services/nativeDeviceModule';
 import { spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
 
@@ -28,6 +29,48 @@ export const SettingsScreen: React.FC = () => {
   const isConnecting = settings.localAiStatus === 'connecting';
   const isCloudConnecting = settings.cloudStatus === 'connecting';
   const [showApiKey, setShowApiKey] = useState(false);
+
+  // USB-OTG serial
+  const [usbDevices, setUsbDevices] = useState<UsbDeviceInfo[]>([]);
+  const [usbScanning, setUsbScanning] = useState(false);
+
+  const scanUsbDevices = useCallback(async () => {
+    if (!arinNative) return;
+    setUsbScanning(true);
+    try {
+      const devices = await arinNative.listUsbDevices();
+      setUsbDevices(devices);
+    } catch {
+      setUsbDevices([]);
+    }
+    setUsbScanning(false);
+  }, []);
+
+  const connectToArduino = useCallback(
+    async (device: UsbDeviceInfo) => {
+      if (!arinNative) return;
+      try {
+        await arinNative.connectUsbSerial(device.vendorId, device.productId);
+      } catch {
+        // connection failure handled by native events
+      }
+    },
+    []
+  );
+
+  const disconnectArduino = useCallback(async () => {
+    if (!arinNative) return;
+    try {
+      await arinNative.disconnectUsbSerial();
+    } catch {
+      // disconnect failure handled by native events
+    }
+  }, []);
+
+  // Scan on mount and when tab is focused
+  useEffect(() => {
+    scanUsbDevices();
+  }, [scanUsbDevices]);
 
   return (
     <ScrollView
@@ -69,6 +112,77 @@ export const SettingsScreen: React.FC = () => {
             }}
             thumbColor={themeColors.onPrimary}
           />
+        </View>
+      </View>
+
+      {/* Voice & Audio (TTS) Card */}
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: themeColors.surfaceContainerLow,
+            borderColor: themeColors.outlineVariant,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={[typography.headlineMd, styles.cardTitle, { color: themeColors.onSurface }]}>
+            Voice & Audio (TTS)
+          </Text>
+          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+            {settings.ttsVoiceGender.toUpperCase()} VOICE
+          </Text>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+            Read Responses Aloud
+          </Text>
+          <Switch
+            value={settings.ttsAutoSpeak}
+            onValueChange={(val) => updateSettings({ ttsAutoSpeak: val })}
+            trackColor={{
+              false: themeColors.surfaceContainerHighest,
+              true: themeColors.primaryContainer,
+            }}
+            thumbColor={themeColors.onPrimary}
+          />
+        </View>
+
+        <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>
+          VOICE GENDER SELECTION
+        </Text>
+        <View style={styles.modeContainer}>
+          {(['female', 'male'] as const).map((gender) => (
+            <TouchableOpacity
+              key={gender}
+              style={[
+                styles.modeBtn,
+                {
+                  backgroundColor: themeColors.surfaceContainerHigh,
+                  borderColor:
+                    settings.ttsVoiceGender === gender
+                      ? themeColors.primaryContainer
+                      : themeColors.outlineVariant,
+                },
+              ]}
+              onPress={() => updateSettings({ ttsVoiceGender: gender })}
+            >
+              <Text
+                style={[
+                  typography.labelCaps,
+                  {
+                    color:
+                      settings.ttsVoiceGender === gender
+                        ? themeColors.primaryContainer
+                        : themeColors.onSurfaceVariant,
+                  },
+                ]}
+              >
+                {gender === 'female' ? '♀ FEMALE VOICE' : '♂ MALE VOICE'}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
 
@@ -423,23 +537,51 @@ export const SettingsScreen: React.FC = () => {
           </Text>
           <StatusBadge label={settings.arduinoStatus} status={settings.arduinoStatus} />
         </View>
-        <View style={styles.row}>
-          <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Arduino Connected</Text>
-          <Switch
-            value={settings.arduinoConnected}
-            onValueChange={(val) =>
-              updateSettings({
-                arduinoConnected: val,
-                arduinoStatus: val ? 'connected' : 'disconnected',
-              })
-            }
-            trackColor={{
-              false: themeColors.surfaceContainerHighest,
-              true: themeColors.primaryContainer,
-            }}
-            thumbColor={themeColors.onPrimary}
-          />
-        </View>
+
+        {/* Scan / Refresh button */}
+        <TouchableOpacity
+          style={[styles.connectBtn, { backgroundColor: themeColors.primaryContainer }]}
+          onPress={scanUsbDevices}
+          disabled={usbScanning}
+        >
+          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>
+            {usbScanning ? 'SCANNING...' : 'SCAN USB DEVICES'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Detected devices */}
+        {usbDevices.length === 0 && !usbScanning && (
+          <Text style={[typography.bodyMd, { color: themeColors.onSurfaceVariant, marginTop: spacing.sm }]}>
+            No USB serial devices detected. Plug in via USB-OTG cable.
+          </Text>
+        )}
+        {usbDevices.map((device) => (
+          <View key={`${device.vendorId}-${device.productId}`} style={styles.row}>
+            <View style={styles.deviceInfo}>
+              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+                {device.name || device.address}
+              </Text>
+              <Text style={[typography.codeSm, { color: themeColors.onSurfaceVariant }]}>
+                VID:{device.vendorId} PID:{device.productId}
+              </Text>
+            </View>
+            {settings.arduinoConnected ? (
+              <TouchableOpacity
+                style={[styles.connectBtn, { backgroundColor: themeColors.error, padding: spacing.sm }]}
+                onPress={disconnectArduino}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>DISCONNECT</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.connectBtn, { backgroundColor: themeColors.primaryContainer, padding: spacing.sm }]}
+                onPress={() => connectToArduino(device)}
+              >
+                <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>CONNECT</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        ))}
       </View>
 
       {/* Device Permission Mode */}
@@ -627,5 +769,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
+  },
+  deviceInfo: {
+    flex: 1,
   },
 });
