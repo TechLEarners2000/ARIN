@@ -190,9 +190,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!settings.arduinoConnected) return;
     const interval = setInterval(async () => {
       try {
+        const { arinNative } = require('../services/nativeDeviceModule');
+        if (arinNative) {
+          const isAlive = await arinNative.isUsbConnected();
+          if (!isAlive) {
+            setSettings((prev) => ({
+              ...prev,
+              arduinoConnected: false,
+              arduinoStatus: 'disconnected',
+            }));
+            return;
+          }
+        }
         await queryRobotBuzzerStatus(true);
       } catch {
-        // If heartbeat fails, the serial read thread will emit SerialDisconnect
+        setSettings((prev) => ({
+          ...prev,
+          arduinoConnected: false,
+          arduinoStatus: 'disconnected',
+        }));
       }
     }, 5000);
     return () => clearInterval(interval);
@@ -205,6 +221,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!arinNative) return;
     let attempts = 0;
     const maxAttempts = 10;
+    const KNOWN_ARDUINO_VIDS = [9025, 6790, 4292, 1027];
     const interval = setInterval(async () => {
       attempts++;
       if (attempts > maxAttempts) {
@@ -214,8 +231,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const devices = await arinNative.listUsbDevices();
         if (devices.length > 0) {
-          const d = devices[0];
-          await arinNative.connectUsbSerial(d.vendorId, d.productId);
+          const targetDevice =
+            devices.find(
+              (d: { vendorId: number; name: string }) =>
+                KNOWN_ARDUINO_VIDS.includes(d.vendorId) ||
+                /arduino|ch340|cp210|ftdi|usb serial/i.test(d.name)
+            ) || devices[0];
+          await arinNative.connectUsbSerial(targetDevice.vendorId, targetDevice.productId);
           clearInterval(interval);
         }
       } catch {

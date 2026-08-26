@@ -1,6 +1,8 @@
 package com.arin
 
 import android.bluetooth.BluetoothAdapter
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -922,39 +924,13 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  @ReactMethod
-  fun connectUsbSerial(vendorId: Int, productId: Int, promise: Promise) {
+  private fun openAndConfigurePort(
+    device: UsbDevice,
+    port: CommonUsbSerialPort,
+    usbManager: UsbManager,
+    promise: Promise
+  ) {
     try {
-      val ctx = reactApplicationContext
-      val usbManager = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
-
-      // Find the matching device
-      val device = usbManager.deviceList.values.firstOrNull {
-        it.vendorId == vendorId && it.productId == productId
-      }
-      if (device == null) {
-        promise.reject("USB_DEVICE_NOT_FOUND", "USB device not found. Check the cable is connected.")
-        return
-      }
-
-      // Disconnect any existing session
-      disconnectUsbSerialInternal()
-
-      // Probe for the correct driver
-      val driver = defaultProber.probeDevice(device)
-      if (driver == null) {
-        promise.reject("USB_DRIVER_NOT_FOUND", "No compatible driver for this USB device.")
-        return
-      }
-
-      if (driver.ports.isEmpty()) {
-        promise.reject("USB_NO_PORTS", "USB device has no serial ports.")
-        return
-      }
-
-      val port = driver.ports[0] as CommonUsbSerialPort
-
-      // Open and configure
       val connection = usbManager.openDevice(device)
       if (connection == null) {
         promise.reject("USB_PERMISSION_DENIED", "USB permission denied. Check device authorization.")
@@ -1007,11 +983,90 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
       // Emit connected event
       val event = Arguments.createMap()
       event.putString("name", device.productName ?: device.deviceName)
-      event.putInt("vendorId", vendorId)
-      event.putInt("productId", productId)
+      event.putInt("vendorId", device.vendorId)
+      event.putInt("productId", device.productId)
       usbHandler.post { emitSerialEvent("SerialConnect", event) }
 
       promise.resolve(true)
+    } catch (e: Throwable) {
+      promise.reject("USB_CONNECT_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun connectUsbSerial(vendorId: Int, productId: Int, promise: Promise) {
+    try {
+      val ctx = reactApplicationContext
+      val usbManager = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
+
+      // Find the matching device
+      val device = usbManager.deviceList.values.firstOrNull {
+        it.vendorId == vendorId && it.productId == productId
+      }
+      if (device == null) {
+        promise.reject("USB_DEVICE_NOT_FOUND", "USB device not found. Check the cable is connected.")
+        return
+      }
+
+      // Disconnect any existing session
+      disconnectUsbSerialInternal()
+
+      // Probe for the correct driver
+      val driver = defaultProber.probeDevice(device)
+      if (driver == null) {
+        promise.reject("USB_DRIVER_NOT_FOUND", "No compatible driver for this USB device.")
+        return
+      }
+
+      if (driver.ports.isEmpty()) {
+        promise.reject("USB_NO_PORTS", "USB device has no serial ports.")
+        return
+      }
+
+      val port = driver.ports[0] as CommonUsbSerialPort
+
+      // Check USB permission, request if needed
+      if (!usbManager.hasPermission(device)) {
+        val actionPermission = "com.arin.USB_PERMISSION_" + device.deviceId
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+          PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val permissionIntent = PendingIntent.getBroadcast(
+          ctx, 0, Intent(actionPermission).setPackage(ctx.packageName), flags
+        )
+        val filter = IntentFilter(actionPermission)
+        var receiverRegistered = false
+        val usbReceiver = object : BroadcastReceiver() {
+          override fun onReceive(context: Context, intent: Intent) {
+            if (actionPermission == intent.action) {
+              synchronized(this) {
+                if (receiverRegistered) {
+                  try { ctx.unregisterReceiver(this) } catch (_: Throwable) {}
+                  receiverRegistered = false
+                }
+              }
+              val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+              if (granted) {
+                openAndConfigurePort(device, port, usbManager, promise)
+              } else {
+                promise.reject("USB_PERMISSION_DENIED", "USB permission denied by user.")
+              }
+            }
+          }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          ctx.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+          ctx.registerReceiver(usbReceiver, filter)
+        }
+        receiverRegistered = true
+        usbManager.requestPermission(device, permissionIntent)
+        return
+      }
+
+      openAndConfigurePort(device, port, usbManager, promise)
     } catch (e: Throwable) {
       promise.reject("USB_CONNECT_FAILED", e.message)
     }

@@ -41,14 +41,21 @@ const ARDUINO_MESSAGES: Record<ArduinoCommand, string> = {
 // ---------------------------------------------------------------------------
 
 let eventEmitter: NativeEventEmitter | null = null;
-let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
 const SERIAL_TIMEOUT_MS = 3000;
 
-function getEventEmitter(): NativeEventEmitter {
+let commandQueue: Promise<any> = Promise.resolve();
+
+function enqueueSerialOperation<T>(op: () => Promise<T>): Promise<T> {
+  const res = commandQueue.then(op, op);
+  commandQueue = res.catch(() => {});
+  return res;
+}
+
+function getEventEmitter(): NativeEventEmitter | null {
   if (!eventEmitter && Platform.OS === 'android' && NativeModules.ArinNative) {
     eventEmitter = new NativeEventEmitter(NativeModules.ArinNative);
   }
-  return eventEmitter!;
+  return eventEmitter;
 }
 
 /** Subscribe to raw serial lines from the native read thread. */
@@ -77,32 +84,52 @@ export function onSerialDisconnect(handler: (info: { reason: string; error?: str
 }
 
 // ---------------------------------------------------------------------------
-// Low-level serial I/O (request/response with timeout)
+// Low-level serial I/O (queued request/response with isolated timeout)
 // ---------------------------------------------------------------------------
 
-function waitForResponse(timeoutMs: number = SERIAL_TIMEOUT_MS): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (pendingTimeout) clearTimeout(pendingTimeout);
+async function writeAndRead(command: string, timeoutMs: number = SERIAL_TIMEOUT_MS): Promise<string> {
+  return enqueueSerialOperation(async () => {
+    const { arinNative } = require('./nativeDeviceModule');
+    if (!arinNative) {
+      throw new Error('Native device bridge not available');
+    }
 
-    const sub = onSerialData((line) => {
-      if (pendingTimeout) clearTimeout(pendingTimeout);
-      pendingTimeout = null;
-      sub();
-      resolve(line);
+    return new Promise<string>((resolve, reject) => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      let unsubscribe: (() => void) | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      };
+
+      unsubscribe = onSerialData((line) => {
+        const trimmed = line.trim();
+        // Ignore unprompted boot messages or push clear alerts unless specifically queried
+        if (trimmed === 'READY' || (trimmed === 'CLEAR' && command !== 'GET_STATUS')) {
+          return;
+        }
+        cleanup();
+        resolve(line);
+      });
+
+      timeoutId = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Serial timeout — no response from Arduino for '${command}'`));
+      }, timeoutMs);
+
+      arinNative.writeSerial(command).catch((err: any) => {
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      });
     });
-
-    pendingTimeout = setTimeout(() => {
-      sub();
-      pendingTimeout = null;
-      reject(new Error('Serial timeout — no response from Arduino'));
-    }, timeoutMs);
   });
-}
-
-async function writeAndRead(command: string, timeoutMs?: number): Promise<string> {
-  const { arinNative } = require('./nativeDeviceModule');
-  await arinNative.writeSerial(command);
-  return waitForResponse(timeoutMs);
 }
 
 // ---------------------------------------------------------------------------
