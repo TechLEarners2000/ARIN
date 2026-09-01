@@ -584,6 +584,40 @@ export const SettingsScreen: React.FC = () => {
         ))}
       </View>
 
+      {/* Background Wake Word Section */}
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: themeColors.surfaceContainerLow,
+            borderColor: themeColors.outlineVariant,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={[typography.headlineMd, styles.cardTitle, { color: themeColors.onSurface }]}>
+            Background Wake Word
+          </Text>
+        </View>
+        <View style={styles.row}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurface, flex: 1, marginRight: spacing.sm }]}>
+            Always-On "Hey ARIN" (Background Service)
+          </Text>
+          <Switch
+            value={!!settings.backgroundWakeWordEnabled}
+            onValueChange={(val) => updateSettings({ backgroundWakeWordEnabled: val })}
+            trackColor={{
+              false: themeColors.surfaceContainerHighest,
+              true: themeColors.primaryContainer,
+            }}
+            thumbColor={themeColors.onPrimary}
+          />
+        </View>
+        <Text style={[typography.bodyMd, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>
+          Runs a foreground service with CPU WakeLock so "Hey ARIN" voice commands work even when the phone screen is off/sleeping.
+        </Text>
+      </View>
+
       {/* Device Permission Mode */}
       <View
         style={[

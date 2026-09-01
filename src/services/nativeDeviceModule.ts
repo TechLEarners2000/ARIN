@@ -44,6 +44,10 @@ interface ArinNativeBridge {
   disconnectUsbSerial(): Promise<boolean>;
   writeSerial(data: string): Promise<boolean>;
   isUsbConnected(): Promise<boolean>;
+  // Background Wake Word Service
+  startBackgroundWakeWord(): Promise<boolean>;
+  stopBackgroundWakeWord(): Promise<boolean>;
+  isBackgroundWakeWordActive(): Promise<boolean>;
 }
 
 /**
@@ -57,3 +61,14 @@ export const arinNative: ArinNativeBridge | null =
   Platform.OS === 'android' ? ((NativeModules.ArinNative as ArinNativeBridge) ?? null) : null;
 
 export const hasNativeBridge = arinNative != null;
+
+/** Subscribe to background wake word events ("WakeWordDetected"). */
+export function onWakeWordDetected(handler: (transcript: string) => void): () => void {
+  if (Platform.OS !== 'android' || !NativeModules.ArinNative) return () => {};
+  const { NativeEventEmitter } = require('react-native');
+  const emitter = new NativeEventEmitter(NativeModules.ArinNative);
+  const sub = emitter.addListener('WakeWordDetected', (transcript: string) => {
+    handler(transcript);
+  });
+  return () => sub.remove();
+}

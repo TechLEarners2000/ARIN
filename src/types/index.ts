@@ -44,6 +44,7 @@ export interface AppSettings {
   preloadedModel: string | null;
   ttsAutoSpeak: boolean;
   ttsVoiceGender: 'female' | 'male';
+  backgroundWakeWordEnabled?: boolean;
 }
 
 // ---------------- Automation Engine Types ----------------

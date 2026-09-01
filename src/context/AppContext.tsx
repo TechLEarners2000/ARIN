@@ -20,6 +20,7 @@ import {
   testConnection,
 } from '../services/localAiService';
 import { darkColors, lightColors, ThemeColors } from '../theme/colors';
+import { arinNative, hasNativeBridge, onWakeWordDetected } from '../services/nativeDeviceModule';
 import { AppSettings, ChatMessageItem, ExecutionStage, ScreenTab, ThemeMode } from '../types';
 
 const ONBOARDING_KEY = '@arin_onboarding_completed';
@@ -74,6 +75,7 @@ const initialSettings: AppSettings = {
   preloadedModel: null,
   ttsAutoSpeak: true,
   ttsVoiceGender: 'female',
+  backgroundWakeWordEnabled: false,
 };
 
 const initialMessages: ChatMessageItem[] = [
@@ -184,6 +186,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubDisconnect();
     };
   }, []);
+
+  // Background Wake Word Service lifecycle
+  useEffect(() => {
+    if (!hasNativeBridge || !arinNative) return;
+    if (settings.backgroundWakeWordEnabled) {
+      arinNative.startBackgroundWakeWord().catch(() => {});
+      setTestLogs((prev) => ['[BG SERVICE] Started background wake word listener.', ...prev]);
+    } else {
+      arinNative.stopBackgroundWakeWord().catch(() => {});
+      setTestLogs((prev) => ['[BG SERVICE] Stopped background wake word listener.', ...prev]);
+    }
+  }, [settings.backgroundWakeWordEnabled]);
 
   // Heartbeat — verify Arduino is alive every 5s while connected
   useEffect(() => {
@@ -664,6 +678,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       appendError(`[ERR 500] ${errMsg}`);
     }
   };
+
+  useEffect(() => {
+    const unsub = onWakeWordDetected((transcript) => {
+      setTestLogs((prev) => [`[BG VOICE] Heard: "${transcript}"`, ...prev]);
+      sendMessage(transcript);
+    });
+    return () => unsub();
+  }, [sendMessage]);
 
   const addTestLog = (command: string) => {
     setTestLogs((prev) => [`[TEST] Command received: ${command}`, ...prev]);

@@ -42,6 +42,22 @@ import android.os.Looper
 class ArinNativeModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
+  companion object {
+    private var instance: ArinNativeModule? = null
+
+    fun sendEvent(eventName: String, params: Any?) {
+      try {
+        instance?.reactApplicationContext
+          ?.getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+          ?.emit(eventName, params)
+      } catch (_: Exception) {}
+    }
+  }
+
+  init {
+    instance = this
+  }
+
   override fun getName(): String = "ArinNative"
 
   // ---------------- Torch ----------------
@@ -1112,5 +1128,40 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
   @ReactMethod
   fun isUsbConnected(promise: Promise) {
     promise.resolve(usbSerialRunning && usbSerialPort != null)
+  }
+
+  // ---------------- Background Wake Word Service ----------------
+
+  @ReactMethod
+  fun startBackgroundWakeWord(promise: Promise) {
+    try {
+      val ctx = reactApplicationContext
+      val intent = Intent(ctx, ArinForegroundService::class.java)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        ctx.startForegroundService(intent)
+      } else {
+        ctx.startService(intent)
+      }
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("START_SERVICE_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun stopBackgroundWakeWord(promise: Promise) {
+    try {
+      val ctx = reactApplicationContext
+      val intent = Intent(ctx, ArinForegroundService::class.java)
+      ctx.stopService(intent)
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("STOP_SERVICE_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun isBackgroundWakeWordActive(promise: Promise) {
+    promise.resolve(ArinForegroundService.isServiceRunning)
   }
 }
