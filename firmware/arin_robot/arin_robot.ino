@@ -1,12 +1,13 @@
 /*
  * ARIN Robot Firmware — App-Controlled Serial Protocol (115200 Baud)
  * 
- * Hardware Wiring:
- *   - Left Motor (L298N):  ENA = Pin 5 (PWM), IN1 = Pin 6, IN2 = Pin 7
- *   - Right Motor (L298N): ENB = Pin 10 (PWM), IN3 = Pin 8, IN4 = Pin 9
- *   - HC-SR04 Ultrasonic: TRIG_PIN = Pin 2, ECHO_PIN = Pin 3
- *   - Buzzer:             BUZZER_PIN = Pin 4
- *   - Serial Connection:  USB Serial at 115200 Baud (USB-OTG to phone)
+ * Hardware Wiring (4WD 4-Motor Setup — Separated as 2 Left | 2 Right):
+ *   - Left Motor Pair (Front Left + Rear Left):   ENA = Pin 5 (PWM), IN1 = Pin 6, IN2 = Pin 7
+ *   - Right Motor Pair (Front Right + Rear Right): ENB = Pin 10 (PWM), IN3 = Pin 8, IN4 = Pin 9
+ *   - HC-SR04 Ultrasonic:                          TRIG_PIN = Pin 2, ECHO_PIN = Pin 3
+ *   - Buzzer:                                      BUZZER_PIN = Pin 4
+ *   - Built-in LED:                                Pin 13 (LED_BUILTIN) — onboard
+ *   - Serial Connection:                           USB Serial at 115200 Baud (USB-OTG to phone)
  */
 
 // Pin Definitions
@@ -20,6 +21,7 @@ const int ENB = 10;
 const int TRIG_PIN = 2;
 const int ECHO_PIN = 3;
 const int BUZZER_PIN = 4;
+const int LED_PIN = 13; // Built-in LED
 
 // Safety & Timing Constants
 const unsigned long SENSOR_INTERVAL_MS = 100;
@@ -33,6 +35,7 @@ bool buzzerActive = false;
 // State Variables
 bool isMoving = false;
 bool obstacleState = false;
+bool ledActive = false;
 
 // Non-blocking Serial Line Buffer
 const size_t BUFFER_SIZE = 64;
@@ -69,6 +72,9 @@ void setup() {
   digitalWrite(ENB, LOW);
   digitalWrite(BUZZER_PIN, LOW);
 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
@@ -89,8 +95,10 @@ void setup() {
  *  TURN:RIGHT:<speed 0-255>  Pivot right at speed         OK:TURN:RIGHT:<speed>
  *  STOP                      Stop both motors             OK:STOP
  *  BEEP:<duration_ms>        Pulse buzzer for duration    OK:BEEP:<duration>
+ *  LED:ON / LED_ON          Turn on built-in LED (pin 13) OK:LED:ON
+ *  LED:OFF / LED_OFF        Turn off built-in LED         OK:LED:OFF
  *  GET_DISTANCE              Ping ultrasonic sensor       DIST:<cm>
- *  GET_STATUS                Query full robot state        STATUS:BUZZER=<ON|OFF>,DISTANCE=<cm>,MOVING=<YES|NO>
+ *  GET_STATUS                Query full robot state        STATUS:BUZZER=<ON|OFF>,LED=<ON|OFF>,DISTANCE=<cm>,MOVING=<YES|NO>
  * 
  * Safety Responses (Edge-triggered, non-blocking):
  *  - OBSTACLE:<cm>  Sent ONCE when obstacle (<20cm) stops moving robot
@@ -210,10 +218,22 @@ void processCommand(char* cmdLine) {
     Serial.print("DIST:");
     Serial.println(dist);
   }
+  else if (strcmp(copy, "LED:ON") == 0 || strcmp(copy, "LED_ON") == 0) {
+    digitalWrite(LED_PIN, HIGH);
+    ledActive = true;
+    Serial.println("OK:LED:ON");
+  }
+  else if (strcmp(copy, "LED:OFF") == 0 || strcmp(copy, "LED_OFF") == 0) {
+    digitalWrite(LED_PIN, LOW);
+    ledActive = false;
+    Serial.println("OK:LED:OFF");
+  }
   else if (strcmp(copy, "GET_STATUS") == 0) {
     long dist = readDistanceCm();
     Serial.print("STATUS:BUZZER=");
     Serial.print(buzzerActive ? "ON" : "OFF");
+    Serial.print(",LED=");
+    Serial.print(ledActive ? "ON" : "OFF");
     Serial.print(",DISTANCE=");
     Serial.print(dist);
     Serial.print(",MOVING=");

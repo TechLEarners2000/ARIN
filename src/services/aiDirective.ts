@@ -92,8 +92,10 @@ function normalizeArduinoCommand(raw: string): ArduinoCommand | null {
   if (norm.includes('LEFT')) return 'TURN_LEFT';
   if (norm.includes('RIGHT')) return 'TURN_RIGHT';
   if (norm.includes('STOP') || norm === 'HALT' || norm === 'BRAKE') return 'STOP';
-  if (norm.includes('LED_ON') || norm === 'LIGHT_ON') return 'LED_ON';
-  if (norm.includes('LED_OFF') || norm === 'LIGHT_OFF') return 'LED_OFF';
+  if (norm.includes('LED') || norm.includes('LIGHT') || norm.includes('LAMP')) {
+    if (norm.includes('OFF') || norm.includes('DISABLE')) return 'LED_OFF';
+    if (norm.includes('ON') || norm.includes('ENABLE')) return 'LED_ON';
+  }
   if (norm.includes('BUZZER') || norm.includes('BEEP') || norm === 'PING') return 'BUZZER_PING';
   return null;
 }
@@ -150,9 +152,25 @@ function parseStep(obj: Record<string, unknown>): AiStep | null {
   return null;
 }
 
+/**
+ * Strip wake word "hey arin" (case-insensitive with optional trailing punctuation).
+ */
+export function stripWakeWord(text: string): { hasWakeWord: boolean; cleanedText: string } {
+  const trimmed = text.trim();
+  const wakeWordRegex = /^(?:hey\s+arin)[,!\s]*/i;
+  if (wakeWordRegex.test(trimmed)) {
+    const cleanedText = trimmed.replace(wakeWordRegex, '').trim();
+    return { hasWakeWord: true, cleanedText: cleanedText || trimmed };
+  }
+  return { hasWakeWord: false, cleanedText: trimmed };
+}
+
 /** Clean up raw text if JSON parsing fails so raw JSON syntax is never shown in chat UI. */
 function sanitizeFallbackText(text: string): string {
   let cleaned = text.trim();
+  // Strip markdown code fences (e.g. ```json ... ``` or ``` ... ```)
+  cleaned = cleaned.replace(/^```(?:json)?/gi, '').replace(/```$/g, '').trim();
+
   // If text looks like a raw JSON object string, try to extract a user-facing string from it
   if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
     const responseMatch = cleaned.match(/"(?:response|text|answer|message|content|prompt)":\s*"([^"]+)"/i);
@@ -186,17 +204,20 @@ export function parseAiDirective(raw: string): AiDirective {
     response: sanitizeFallbackText(text),
   });
 
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
+  // Strip markdown fences before searching for JSON object delimiters
+  const strippedRaw = raw.replace(/^```(?:json)?/gi, '').replace(/```$/g, '').trim();
+
+  const start = strippedRaw.indexOf('{');
+  const end = strippedRaw.lastIndexOf('}');
   if (start === -1 || end === -1 || end < start) {
-    return fallback(raw);
+    return fallback(strippedRaw);
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
+    parsed = JSON.parse(strippedRaw.slice(start, end + 1));
   } catch {
-    return fallback(raw);
+    return fallback(strippedRaw);
   }
   if (typeof parsed !== 'object' || parsed === null) {
     return fallback(raw);

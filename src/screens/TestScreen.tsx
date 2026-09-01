@@ -19,31 +19,44 @@ import { spacing } from '../theme/spacing';
 import { typography } from '../theme/typography';
 import { Rule, RuleAction, RuleTrigger } from '../types';
 
-type CommandCategory =
-  | 'TORCH'
-  | 'WIFI'
-  | 'BLUETOOTH'
-  | 'VOLUME'
-  | 'SMS'
+type TestCommandType =
+  | 'TORCH_ON'
+  | 'TORCH_OFF'
+  | 'WIFI_ON'
+  | 'WIFI_OFF'
+  | 'BLUETOOTH_ON'
+  | 'BLUETOOTH_OFF'
+  | 'CAMERA_OPEN'
   | 'CALL'
-  | 'WEATHER'
-  | 'BATTERY'
-  | 'ROBOT_MOVE';
+  | 'SMS'
+  | 'WHATSAPP'
+  | 'OPEN_APP'
+  | 'OPEN_SETTINGS'
+  | 'VOLUME_UP'
+  | 'VOLUME_DOWN'
+  | 'SET_VOLUME'
+  | 'MUTE_SOUND'
+  | 'UNMUTE_SOUND'
+  | 'GET_BATTERY'
+  | 'GET_WEATHER'
+  | 'MOVE_FORWARD'
+  | 'MOVE_BACKWARD'
+  | 'TURN_LEFT'
+  | 'TURN_RIGHT'
+  | 'STOP'
+  | 'LED_ON'
+  | 'LED_OFF'
+  | 'BUZZER_PING';
 
 export const TestScreen: React.FC = () => {
   const { sendMessage, settings, themeColors, addTestLog } = useApp();
 
   // Command Tester State
-  const [selectedCategory, setSelectedCategory] = useState<CommandCategory>('TORCH');
-  const [torchState, setTorchState] = useState<'ON' | 'OFF'>('ON');
-  const [wifiState, setWifiState] = useState<'ON' | 'OFF'>('ON');
-  const [btState, setBtState] = useState<'ON' | 'OFF'>('OFF');
+  const [selectedCommand, setSelectedCommand] = useState<TestCommandType>('TORCH_ON');
+  const [targetVal, setTargetVal] = useState('1345');
+  const [messageVal, setMessageVal] = useState('hi');
   const [volumeLevel, setVolumeLevel] = useState('100');
-  const [smsTarget, setSmsTarget] = useState('2343');
-  const [smsMessage, setSmsMessage] = useState('hi');
-  const [callTarget, setCallTarget] = useState('1345');
   const [weatherCity, setWeatherCity] = useState('Tokyo');
-  const [moveCmd, setMoveCmd] = useState<'FORWARD' | 'BACKWARD' | 'LEFT' | 'RIGHT' | 'STOP'>('FORWARD');
 
   // Live Rules State
   const [rules, setRules] = useState<Rule[]>([]);
@@ -99,42 +112,87 @@ export const TestScreen: React.FC = () => {
   // Run direct command from tester
   const handleExecuteCommand = () => {
     let commandString = '';
-    switch (selectedCategory) {
-      case 'TORCH':
-        commandString = torchState === 'ON' ? 'Turn on the flash' : 'Turn off the flash';
+    switch (selectedCommand) {
+      case 'TORCH_ON':
+        commandString = 'Turn on the flash';
         break;
-      case 'WIFI':
-        commandString = wifiState === 'ON' ? 'Turn on wifi' : 'Turn off wifi';
+      case 'TORCH_OFF':
+        commandString = 'Turn off the flash';
         break;
-      case 'BLUETOOTH':
-        commandString = btState === 'ON' ? 'Turn on bluetooth' : 'Turn off bluetooth';
+      case 'WIFI_ON':
+        commandString = 'Turn on wifi';
         break;
-      case 'VOLUME':
-        commandString = `Set volume to ${volumeLevel}%`;
+      case 'WIFI_OFF':
+        commandString = 'Turn off wifi';
         break;
-      case 'SMS':
-        commandString = `Message ${smsTarget.trim()} ${smsMessage.trim()}`;
+      case 'BLUETOOTH_ON':
+        commandString = 'Turn on bluetooth';
+        break;
+      case 'BLUETOOTH_OFF':
+        commandString = 'Turn off bluetooth';
+        break;
+      case 'CAMERA_OPEN':
+        commandString = 'Open camera';
         break;
       case 'CALL':
-        commandString = `Call ${callTarget.trim()}`;
+        commandString = `Call ${targetVal.trim() || '1345'}`;
         break;
-      case 'WEATHER':
-        commandString = `What is the weather in ${weatherCity.trim()}?`;
+      case 'SMS':
+        commandString = `Message ${targetVal.trim() || '2343'} ${messageVal.trim() || 'hi'}`;
         break;
-      case 'BATTERY':
+      case 'WHATSAPP':
+        commandString = `Send WhatsApp message to ${targetVal.trim() || '1234567890'} ${messageVal.trim() || 'hi'}`;
+        break;
+      case 'OPEN_APP':
+        commandString = `Open ${targetVal.trim() || 'Spotify'}`;
+        break;
+      case 'OPEN_SETTINGS':
+        commandString = `Open ${targetVal.trim() || 'Spotify'} app info`;
+        break;
+      case 'VOLUME_UP':
+        commandString = 'Turn volume up';
+        break;
+      case 'VOLUME_DOWN':
+        commandString = 'Turn volume down';
+        break;
+      case 'SET_VOLUME':
+        commandString = `Set volume to ${volumeLevel}%`;
+        break;
+      case 'MUTE_SOUND':
+        commandString = 'Mute phone';
+        break;
+      case 'UNMUTE_SOUND':
+        commandString = 'Unmute phone';
+        break;
+      case 'GET_BATTERY':
         commandString = 'Check battery level';
         break;
-      case 'ROBOT_MOVE':
-        commandString =
-          moveCmd === 'STOP'
-            ? 'Stop'
-            : moveCmd === 'FORWARD'
-            ? 'Move forward'
-            : moveCmd === 'BACKWARD'
-            ? 'Move backward'
-            : moveCmd === 'LEFT'
-            ? 'Turn left'
-            : 'Turn right';
+      case 'GET_WEATHER':
+        commandString = `What is the weather in ${weatherCity.trim() || 'Tokyo'}?`;
+        break;
+      case 'MOVE_FORWARD':
+        commandString = 'Move forward';
+        break;
+      case 'MOVE_BACKWARD':
+        commandString = 'Move backward';
+        break;
+      case 'TURN_LEFT':
+        commandString = 'Turn left';
+        break;
+      case 'TURN_RIGHT':
+        commandString = 'Turn right';
+        break;
+      case 'STOP':
+        commandString = 'Stop';
+        break;
+      case 'LED_ON':
+        commandString = 'Turn on robot led';
+        break;
+      case 'LED_OFF':
+        commandString = 'Turn off robot led';
+        break;
+      case 'BUZZER_PING':
+        commandString = 'Sound the buzzer';
         break;
     }
 
@@ -285,126 +343,94 @@ export const TestScreen: React.FC = () => {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
           {(
             [
-              'TORCH',
-              'WIFI',
-              'BLUETOOTH',
-              'VOLUME',
-              'SMS',
+              'TORCH_ON',
+              'TORCH_OFF',
+              'WIFI_ON',
+              'WIFI_OFF',
+              'BLUETOOTH_ON',
+              'BLUETOOTH_OFF',
+              'CAMERA_OPEN',
               'CALL',
-              'WEATHER',
-              'BATTERY',
-              'ROBOT_MOVE',
+              'SMS',
+              'WHATSAPP',
+              'OPEN_APP',
+              'OPEN_SETTINGS',
+              'VOLUME_UP',
+              'VOLUME_DOWN',
+              'SET_VOLUME',
+              'MUTE_SOUND',
+              'UNMUTE_SOUND',
+              'GET_BATTERY',
+              'GET_WEATHER',
+              'MOVE_FORWARD',
+              'MOVE_BACKWARD',
+              'TURN_LEFT',
+              'TURN_RIGHT',
+              'STOP',
+              'LED_ON',
+              'LED_OFF',
+              'BUZZER_PING',
             ] as const
-          ).map((cat) => (
+          ).map((cmd) => (
             <TouchableOpacity
-              key={cat}
+              key={cmd}
               style={[
                 styles.chip,
                 {
                   backgroundColor:
-                    selectedCategory === cat
+                    selectedCommand === cmd
                       ? themeColors.primaryContainer
                       : themeColors.surfaceContainerHigh,
                 },
               ]}
-              onPress={() => setSelectedCategory(cat)}
+              onPress={() => setSelectedCommand(cmd)}
             >
               <Text
                 style={[
                   typography.labelCaps,
-                  { color: selectedCategory === cat ? themeColors.onPrimary : themeColors.onSurface },
+                  { color: selectedCommand === cmd ? themeColors.onPrimary : themeColors.onSurface },
                 ]}
               >
-                {cat}
+                {cmd}
               </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
 
-        {/* DYNAMIC PARAMETER CONTROLS FOR SELECTED COMMAND */}
+        {/* DYNAMIC PARAMETER CONTROLS BASED ON SELECTED COMMAND */}
         <View style={styles.paramBox}>
-          {selectedCategory === 'TORCH' && (
-            <View style={styles.optionRow}>
-              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Flashlight Target State:</Text>
-              <View style={styles.toggleGroup}>
-                {(['ON', 'OFF'] as const).map((st) => (
-                  <TouchableOpacity
-                    key={st}
-                    style={[
-                      styles.toggleBtn,
-                      {
-                        backgroundColor:
-                          torchState === st
-                            ? themeColors.primaryContainer
-                            : themeColors.surfaceContainerHigh,
-                      },
-                    ]}
-                    onPress={() => setTorchState(st)}
-                  >
-                    <Text style={[typography.labelCaps, { color: torchState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
-                      {st}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+          {(selectedCommand === 'CALL' || selectedCommand === 'OPEN_APP' || selectedCommand === 'OPEN_SETTINGS') && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>
+                TARGET ({selectedCommand === 'CALL' ? 'PHONE NUMBER / CONTACT' : 'APP OR SETTING NAME'})
+              </Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={targetVal}
+                onChangeText={setTargetVal}
+              />
             </View>
           )}
 
-          {selectedCategory === 'WIFI' && (
-            <View style={styles.optionRow}>
-              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Wi-Fi Target State:</Text>
-              <View style={styles.toggleGroup}>
-                {(['ON', 'OFF'] as const).map((st) => (
-                  <TouchableOpacity
-                    key={st}
-                    style={[
-                      styles.toggleBtn,
-                      {
-                        backgroundColor:
-                          wifiState === st
-                            ? themeColors.primaryContainer
-                            : themeColors.surfaceContainerHigh,
-                      },
-                    ]}
-                    onPress={() => setWifiState(st)}
-                  >
-                    <Text style={[typography.labelCaps, { color: wifiState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
-                      {st}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+          {(selectedCommand === 'SMS' || selectedCommand === 'WHATSAPP') && (
+            <View style={styles.inputGroup}>
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>TARGET NUMBER / CONTACT</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={targetVal}
+                onChangeText={setTargetVal}
+                keyboardType="phone-pad"
+              />
+              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>MESSAGE TEXT</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
+                value={messageVal}
+                onChangeText={setMessageVal}
+              />
             </View>
           )}
 
-          {selectedCategory === 'BLUETOOTH' && (
-            <View style={styles.optionRow}>
-              <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>Bluetooth Target State:</Text>
-              <View style={styles.toggleGroup}>
-                {(['ON', 'OFF'] as const).map((st) => (
-                  <TouchableOpacity
-                    key={st}
-                    style={[
-                      styles.toggleBtn,
-                      {
-                        backgroundColor:
-                          btState === st
-                            ? themeColors.primaryContainer
-                            : themeColors.surfaceContainerHigh,
-                      },
-                    ]}
-                    onPress={() => setBtState(st)}
-                  >
-                    <Text style={[typography.labelCaps, { color: btState === st ? themeColors.onPrimary : themeColors.onSurface }]}>
-                      {st}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {selectedCategory === 'VOLUME' && (
+          {selectedCommand === 'SET_VOLUME' && (
             <View style={styles.inputGroup}>
               <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>VOLUME PERCENTAGE (0-100)</Text>
               <TextInput
@@ -416,36 +442,7 @@ export const TestScreen: React.FC = () => {
             </View>
           )}
 
-          {selectedCategory === 'SMS' && (
-            <View style={styles.inputGroup}>
-              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>TARGET NUMBER</Text>
-              <TextInput
-                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
-                value={smsTarget}
-                onChangeText={setSmsTarget}
-                keyboardType="phone-pad"
-              />
-              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.xs }]}>MESSAGE TEXT</Text>
-              <TextInput
-                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
-                value={smsMessage}
-                onChangeText={setSmsMessage}
-              />
-            </View>
-          )}
-
-          {selectedCategory === 'CALL' && (
-            <View style={styles.inputGroup}>
-              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>CALL TARGET (NUMBER / CONTACT)</Text>
-              <TextInput
-                style={[styles.input, { backgroundColor: themeColors.surfaceContainerHigh, color: themeColors.onSurface, borderColor: themeColors.outlineVariant }]}
-                value={callTarget}
-                onChangeText={setCallTarget}
-              />
-            </View>
-          )}
-
-          {selectedCategory === 'WEATHER' && (
+          {selectedCommand === 'GET_WEATHER' && (
             <View style={styles.inputGroup}>
               <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>CITY NAME</Text>
               <TextInput
@@ -456,37 +453,31 @@ export const TestScreen: React.FC = () => {
             </View>
           )}
 
-          {selectedCategory === 'BATTERY' && (
-            <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
-              Queries device battery percentage & charging status instantly.
+          {[
+            'TORCH_ON',
+            'TORCH_OFF',
+            'WIFI_ON',
+            'WIFI_OFF',
+            'BLUETOOTH_ON',
+            'BLUETOOTH_OFF',
+            'CAMERA_OPEN',
+            'VOLUME_UP',
+            'VOLUME_DOWN',
+            'MUTE_SOUND',
+            'UNMUTE_SOUND',
+            'GET_BATTERY',
+            'MOVE_FORWARD',
+            'MOVE_BACKWARD',
+            'TURN_LEFT',
+            'TURN_RIGHT',
+            'STOP',
+            'LED_ON',
+            'LED_OFF',
+            'BUZZER_PING',
+          ].includes(selectedCommand) && (
+            <Text style={[typography.bodyMd, { color: themeColors.onSurfaceVariant }]}>
+              Executes direct command <Text style={{ color: themeColors.primaryContainer, fontWeight: 'bold' }}>{selectedCommand}</Text> instantly.
             </Text>
-          )}
-
-          {selectedCategory === 'ROBOT_MOVE' && (
-            <View style={styles.inputGroup}>
-              <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant }]}>ROBOT DIRECTION</Text>
-              <View style={styles.chipRow}>
-                {(['FORWARD', 'BACKWARD', 'LEFT', 'RIGHT', 'STOP'] as const).map((dir) => (
-                  <TouchableOpacity
-                    key={dir}
-                    style={[
-                      styles.toggleBtn,
-                      {
-                        backgroundColor:
-                          moveCmd === dir
-                            ? themeColors.primaryContainer
-                            : themeColors.surfaceContainerHigh,
-                      },
-                    ]}
-                    onPress={() => setMoveCmd(dir)}
-                  >
-                    <Text style={[typography.labelCaps, { color: moveCmd === dir ? themeColors.onPrimary : themeColors.onSurface }]}>
-                      {dir}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
           )}
         </View>
 
@@ -495,7 +486,7 @@ export const TestScreen: React.FC = () => {
           onPress={handleExecuteCommand}
         >
           <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>
-            ⚡ RUN TEST COMMAND
+            ⚡ RUN TEST COMMAND ({selectedCommand})
           </Text>
         </TouchableOpacity>
       </View>

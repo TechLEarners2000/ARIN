@@ -6,7 +6,7 @@
 |-----|-----------|-------|
 | 1 | Arduino Uno | ATmega328P |
 | 1 | L298N Motor Driver | Dual H-Bridge |
-| 2 | DC Geared Motors | Left + Right wheels |
+| 4 | DC Geared Motors | 4WD chassis (2 Left + 2 Right, wired in parallel per side) |
 | 1 | HC-SR04 Ultrasonic | Distance sensor |
 | 1 | Passive Buzzer | Active buzzer also works |
 | 1 | 12V Battery Pack | Powers L298N motor input |
@@ -29,6 +29,7 @@ Arduino Uno
 │  D8 ──────── IN3 (L298N)   │
 │  D9 ──────── IN4 (L298N)   │
 │  D10 (PWM) ─ ENB (L298N)   │
+│  D13 ──────── Built-in LED │
 │                             │
 │  5V ───────── VCC (HC-SR04)│
 │  GND ──────── GND (common) │
@@ -40,30 +41,32 @@ Arduino Uno
 
 **Pins 0, 1 are RESERVED** — RX/TX serial to USB. Never connect anything here.
 
+**Pin 13 (Built-in LED)** — Arduino's onboard LED. No external wiring needed. Controlled by the `LED:ON` / `LED:OFF` serial commands.
+
 ---
 
 ## L298N Motor Driver Wiring
 
 ```
-L298N Module
-┌──────────────────────────────┐
-│                              │
-│  12V Input ←── Battery (+)   │
-│  GND      ←── Battery (-)   │
-│  5V Output ──→ Arduino VIN   │
-│                              │
-│  ENA ←────── Arduino D5 (PWM)│
-│  IN1 ←────── Arduino D6     │
-│  IN2 ←────── Arduino D7     │
-│  IN3 ←────── Arduino D8     │
-│  IN4 ←────── Arduino D9     │
-│  ENB ←────── Arduino D10(PWM)│
-│                              │
-│  OUT1 ──────→ Left Motor (+) │
-│  OUT2 ──────→ Left Motor (-) │
-│  OUT3 ──────→ Right Motor (+)│
-│  OUT4 ──────→ Right Motor (-)│
-└──────────────────────────────┘
+L298N Module (4WD Setup — 4 Motors separated into 2 Pairs: Left & Right)
+┌────────────────────────────────────────────────────────┐
+│                                                        │
+│  12V Input ←── Battery (+)                             │
+│  GND      ←── Battery (-)                             │
+│  5V Output ──→ Arduino VIN                             │
+│                                                        │
+│  ENA ←────── Arduino D5 (PWM)                          │
+│  IN1 ←────── Arduino D6                               │
+│  IN2 ←────── Arduino D7                               │
+│  IN3 ←────── Arduino D8                               │
+│  IN4 ←────── Arduino D9                               │
+│  ENB ←────── Arduino D10(PWM)                          │
+│                                                        │
+│  OUT1 ──────→ Front Left Motor (+)  &  Rear Left Motor (+)  [L Pair]
+│  OUT2 ──────→ Front Left Motor (-)  &  Rear Left Motor (-)  [L Pair]
+│  OUT3 ──────→ Front Right Motor (+) &  Rear Right Motor (+) [R Pair]
+│  OUT4 ──────→ Front Right Motor (-) &  Rear Right Motor (-) [R Pair]
+└────────────────────────────────────────────────────────┘
 ```
 
 **Important:**

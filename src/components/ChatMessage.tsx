@@ -9,6 +9,14 @@ interface ChatMessageProps {
   message: ChatMessageItem;
 }
 
+function formatDisplayText(text: string): string {
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?/gi, '').replace(/```$/g, '').trim();
+  }
+  return cleaned;
+}
+
 export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
   const { themeColors } = useApp();
 
@@ -16,7 +24,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
     return (
       <View style={styles.systemContainer}>
         <Text style={[typography.codeSm, styles.systemText, { color: themeColors.onSurfaceVariant }]}>
-          {message.text}
+          {formatDisplayText(message.text)}
         </Text>
       </View>
     );
@@ -26,7 +34,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
     return (
       <View style={[styles.errorContainer, { backgroundColor: themeColors.errorContainer, borderColor: themeColors.error }]}>
         <Text style={[typography.codeSm, { color: themeColors.error }]}>
-          {message.text}
+          {formatDisplayText(message.text)}
         </Text>
       </View>
     );
@@ -75,7 +83,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
         ]}
       >
         <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
-          {message.text}
+          {formatDisplayText(message.text)}
         </Text>
       </View>
     </View>

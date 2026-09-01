@@ -196,6 +196,10 @@ export async function executeRuleAction(
             ? 'TURN_RIGHT'
             : cmdUpper.startsWith('BEEP')
             ? 'BUZZER_PING'
+            : /LED|LIGHT|LAMP/.test(cmdUpper) && /OFF|DISABLE/.test(cmdUpper)
+            ? 'LED_OFF'
+            : /LED|LIGHT|LAMP/.test(cmdUpper) && /ON|ENABLE/.test(cmdUpper)
+            ? 'LED_ON'
             : 'STOP'
         ) as any;
 

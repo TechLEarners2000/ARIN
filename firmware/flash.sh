@@ -33,8 +33,11 @@ echo "[2/2] Uploading..."
 if ! arduino-cli upload --fqbn "$FQBN" --port "$PORT" "$SKETCH_DIR" 2>/dev/null; then
   echo ""
   echo "Permission denied on $PORT"
-  echo "Fix: sudo usermod -aG dialout \$(whoami)"
-  echo "Then log out and log back in."
+  echo "If arduino-cli is a Snap package, grant serial access:"
+  echo "  sudo snap connect arduino-cli:raw-usb"
+  echo "  sudo snap connect arduino-cli:serial-port"
+  echo "Alternatively add yourself to the dialout group, then log out/in:"
+  echo "  sudo usermod -aG dialout \$(whoami)"
   exit 1
 fi
 echo ""

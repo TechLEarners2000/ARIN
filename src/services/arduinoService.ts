@@ -23,6 +23,8 @@ const COMMAND_MAP: Record<string, string> = {
   TURN_RIGHT: 'TURN:RIGHT:200',
   STOP: 'STOP',
   BUZZER_PING: 'BEEP:300',
+  LED_ON: 'LED:ON',
+  LED_OFF: 'LED:OFF',
 };
 
 const ARDUINO_MESSAGES: Record<ArduinoCommand, string> = {
@@ -31,8 +33,8 @@ const ARDUINO_MESSAGES: Record<ArduinoCommand, string> = {
   TURN_LEFT: 'Pivoting robot left...',
   TURN_RIGHT: 'Pivoting robot right...',
   STOP: 'Robot stopped.',
-  LED_ON: 'LED control not available on this robot.',
-  LED_OFF: 'LED control not available on this robot.',
+  LED_ON: 'Built-in LED turned on.',
+  LED_OFF: 'Built-in LED turned off.',
   BUZZER_PING: 'Robot buzzer sounded.',
 };
 

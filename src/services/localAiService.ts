@@ -425,6 +425,8 @@ export async function initArinModel(
       },
       body: JSON.stringify({
         model: ARIN_MODEL_NAME,
+        from: baseModel.trim(),
+        system: systemPrompt,
         modelfile,
       }),
     },

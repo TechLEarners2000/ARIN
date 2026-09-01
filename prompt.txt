@@ -80,3 +80,7 @@ Examples:
 "Open Spotify" → {"action":"device","command":"OPEN_APP","target":"Spotify"}
 "What's today's gold rate?" → {"action":"cloud","prompt":"What is today's gold rate?"}
 "Move forward" → {"action":"arduino","command":"MOVE_FORWARD"}
+"Turn on robot led" → {"action":"arduino","command":"LED_ON"}
+"Turn off robot led" → {"action":"arduino","command":"LED_OFF"}
+"Turn on the robot light" → {"action":"arduino","command":"LED_ON"}
+"Sound the buzzer" → {"action":"arduino","command":"BUZZER_PING"}

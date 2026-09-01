@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective } from '../services/aiDirective';
+import { AiDirective, ARIN_SYSTEM_PROMPT, parseAiDirective, stripWakeWord } from '../services/aiDirective';
 import { sendArduinoCommand, onSerialConnect, onSerialDisconnect, queryRobotBuzzerStatus } from '../services/arduinoService';
 import { sendDeviceCommand, speakText, stopSpeech } from '../services/deviceService';
 import { runPipeline } from '../services/pipelineExecutor';
@@ -247,74 +247,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearInterval(interval);
   }, [settings.arduinoConnected]);
 
-  // Preload (init) the ARIN model once per host+model per connection epoch:
-  // bake the system prompt into an Ollama custom model so subsequent chat
-  // requests only carry the user's short message. A failed attempt is retried
-  // on the next successful connection (epoch bump in connectLocalAi).
-  const initAttemptedKeyRef = useRef<string>('');
-  const connectionEpochRef = useRef(0);
-
-  useEffect(() => {
-    const ready =
-      settings.localAiEnabled &&
-      settings.localAiStatus === 'connected' &&
-      !!settings.selectedModel;
-    if (!ready) return;
-
-    const key = `${connectionEpochRef.current}|${settings.localAiHost}|${settings.selectedModel}`;
-    if (initAttemptedKeyRef.current === key) return;
-    initAttemptedKeyRef.current = key;
-
-    let cancelled = false;
-    setTestLogs((prev) => [
-      `[INIT] Baking system prompt into "${ARIN_MODEL_NAME}" (from "${settings.selectedModel}")...`,
-      ...prev,
-    ]);
-
-    (async () => {
-      try {
-        await initArinModel(settings.localAiHost, settings.selectedModel, ARIN_SYSTEM_PROMPT);
-        if (cancelled) return;
-        updateSettings({
-          preloadedModel: ARIN_MODEL_NAME,
-          localAiModels: settings.localAiModels.includes(ARIN_MODEL_NAME)
-            ? settings.localAiModels
-            : [...settings.localAiModels, ARIN_MODEL_NAME],
-        });
-        setTestLogs((prev) => [
-          `[INIT] "${ARIN_MODEL_NAME}" ready — only short user messages will be sent.`,
-          ...prev,
-        ]);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (Date.now() + 1).toString(),
-            sender: 'ARIN',
-            text: `ARIN system prompt initialized into the local model. Stop words like "hi" or "call 987" are now enough — the full rules stay with the model.`,
-            timestamp: new Date().toLocaleTimeString(),
-          },
-        ]);
-      } catch (error: unknown) {
-        if (cancelled) return;
-        const errMsg = error instanceof Error ? error.message : String(error);
-        setTestLogs((prev) => [
-          `[INIT] Failed: ${errMsg} — falling back to sending the prompt per request.`,
-          ...prev,
-        ]);
-        updateSettings({ preloadedModel: null });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    settings.localAiEnabled,
-    settings.localAiStatus,
-    settings.localAiHost,
-    settings.selectedModel,
-    settings.localAiModels,
-  ]);
+  const chatHistoryRef = useRef<import('../services/localAiService').ChatMessage[]>([]);
 
   const finishSplash = () => {
     setIsSplashVisible(false);
@@ -376,8 +309,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTestLogs((prev) => [`[CONN] Failed: ${result.message}`, ...prev]);
       return false;
     }
-
-    connectionEpochRef.current += 1;
 
     const modelIds = result.models
       ? result.models.map((m) => m.id)
@@ -665,14 +596,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPipelinePath(['request_sent', 'local_processing', 'response_received', 'done']);
     setCurrentStage('request_sent');
 
+    // Check for Wake Word "hey arin"
+    const { hasWakeWord, cleanedText } = stripWakeWord(text);
+    if (hasWakeWord) {
+      setTestLogs((prev) => [`[WAKE WORD] Wake word "hey arin" detected. Processing: "${cleanedText}"`, ...prev]);
+    }
+    const promptText = cleanedText;
+
     // Deliberate small delay for stage visibility
     await new Promise<void>((resolve) => setTimeout(() => resolve(), 300));
     setCurrentStage('local_processing');
 
     const localReady = settings.localAiEnabled && settings.localAiStatus === 'connected';
 
-    // Local AI is primary and drives all routing decisions via ARIN_SYSTEM_PROMPT.
-    // Cloud is only ever called as a delegate the local model explicitly requests.
+    // Local AI is primary and drives all routing decisions.
     if (!localReady) {
       if (!settings.localAiEnabled) {
         appendError('[ERR 503] Local AI is disabled. Enable it in SETUP — it drives all routing.');
@@ -687,21 +624,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // With the preloaded model (prompt baked on the server) only the user
-      // message is sent. Without it, fall back to the full system prompt.
-      const outgoingMessages = settings.preloadedModel
-        ? [{ role: 'user' as const, content: text }]
-        : [
-            { role: 'system' as const, content: ARIN_SYSTEM_PROMPT },
-            { role: 'user' as const, content: text },
-          ];
+      // Always start chat context with ARIN_SYSTEM_PROMPT at position 0, followed by history & prompt
+      const outgoingMessages = [
+        { role: 'system' as const, content: ARIN_SYSTEM_PROMPT },
+        ...chatHistoryRef.current.slice(-10),
+        { role: 'user' as const, content: promptText },
+      ];
       const localResponse = await sendChatCompletion(
         settings.localAiHost,
-        settings.preloadedModel ?? settings.selectedModel,
+        settings.selectedModel,
         outgoingMessages
       );
 
       const rawText = localResponse.choices?.[0]?.message?.content ?? '';
+
+      // Save turn to conversation history
+      chatHistoryRef.current.push({ role: 'user', content: promptText });
+      chatHistoryRef.current.push({ role: 'assistant', content: rawText });
+
       const directive = parseAiDirective(rawText);
 
       // A top-level "schedule" defers the whole directive to the scheduler.
