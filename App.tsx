@@ -9,10 +9,11 @@ import { OnboardingScreen } from './src/screens/OnboardingScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { SplashScreen } from './src/screens/SplashScreen';
 import { TestScreen } from './src/screens/TestScreen';
+import { ControllerScreen } from './src/screens/controller/ControllerScreen';
 import { colors } from './src/theme/colors';
 
 function MainNavigator() {
-  const { isSplashVisible, hasCompletedOnboarding, activeTab } = useApp();
+  const { isSplashVisible, hasCompletedOnboarding, activeTab, isControllerOpen, setIsControllerOpen } = useApp();
   const safeArea = useSafeAreaInsets();
 
   if (isSplashVisible) {
@@ -23,6 +24,14 @@ function MainNavigator() {
     return (
       <View style={[styles.root, { paddingTop: safeArea.top, paddingBottom: safeArea.bottom }]}>
         <OnboardingScreen />
+      </View>
+    );
+  }
+
+  if (isControllerOpen) {
+    return (
+      <View style={styles.root}>
+        <ControllerScreen onClose={() => setIsControllerOpen(false)} />
       </View>
     );
   }

@@ -5,8 +5,6 @@ import { sendArduinoCommand, onSerialConnect, onSerialDisconnect, queryRobotBuzz
 import { sendDeviceCommand, speakText, stopSpeech } from '../services/deviceService';
 import { runPipeline } from '../services/pipelineExecutor';
 import { rearmPersistedJobs, scheduleJob } from '../services/schedulerService';
-import { saveRule } from '../services/ruleStorage';
-import { startRuleEngineMonitors, stopRuleEngineMonitors } from '../services/triggerMonitors';
 import {
   fetchModels as fetchCloudModelsService,
   sendChatCompletion as sendCloudChatCompletion,
@@ -38,8 +36,11 @@ interface AppContextType {
   themeColors: ThemeColors;
   activeTab: ScreenTab;
   setActiveTab: (tab: ScreenTab) => void;
+  isControllerOpen: boolean;
+  setIsControllerOpen: (open: boolean) => void;
   messages: ChatMessageItem[];
   sendMessage: (text: string) => void;
+  addChatMessage: (sender: 'OPERATOR' | 'ARIN' | 'SYSTEM' | 'ERROR', text: string) => void;
   isProcessing: boolean;
   currentStage: ExecutionStage;
   pipelinePath: ExecutionStage[];
@@ -100,6 +101,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>('dark');
   const [activeTab, setActiveTab] = useState<ScreenTab>('dashboard');
+  const [isControllerOpen, setIsControllerOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessageItem[]>(initialMessages);
   const [isProcessing, setIsProcessing] = useState(false);
   const [currentStage, setCurrentStage] = useState<ExecutionStage>('idle');
@@ -151,13 +153,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     rearmPersistedJobs((directive) => {
       executeDirectiveNow(directive, /* fromScheduler */ true);
     });
-    startRuleEngineMonitors({
-      isArduinoConnected: settings.arduinoConnected,
-      onLog: (msg) => setTestLogs((prev) => [msg, ...prev]),
-    });
-    return () => {
-      stopRuleEngineMonitors();
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.arduinoConnected]);
 
@@ -508,20 +503,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (directive.action === 'create_rule') {
-      const ruleData = directive.rule || {};
-      const newRule = {
-        id: `rule_${Date.now()}`,
-        name: ruleData.name || 'AI Automation Rule',
-        trigger: ruleData.trigger || { type: 'manual' },
-        actions: ruleData.actions || [{ type: 'notification', title: 'ARIN Rule', body: 'Triggered' }],
-        enabled: true,
-        lastTriggeredAt: null,
-        cooldownMs: 60000,
-      } as any;
-
-      await saveRule(newRule);
-      setTestLogs((prev) => [`[RULE] AI created automation rule: "${newRule.name}"`, ...prev]);
-      finishWithReply(directive.response || `Created automation rule: "${newRule.name}".`);
+      const ruleName = directive.rule?.name || 'Automation Rule';
+      setTestLogs((prev) => [`[RULE] Received rule directive: "${ruleName}"`, ...prev]);
+      finishWithReply(directive.response || `Received rule: "${ruleName}".`);
       return;
     }
 
@@ -687,6 +671,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsub();
   }, [sendMessage]);
 
+  const addChatMessage = useCallback((sender: 'OPERATOR' | 'ARIN' | 'SYSTEM' | 'ERROR', text: string) => {
+    const item: ChatMessageItem = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
+      sender,
+      text,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+    setMessages((prev) => [...prev, item]);
+  }, []);
+
   const addTestLog = (command: string) => {
     setTestLogs((prev) => [`[TEST] Command received: ${command}`, ...prev]);
   };
@@ -730,8 +724,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         themeColors,
         activeTab,
         setActiveTab,
+        isControllerOpen,
+        setIsControllerOpen,
         messages,
         sendMessage,
+        addChatMessage,
         isProcessing,
         currentStage,
         pipelinePath,

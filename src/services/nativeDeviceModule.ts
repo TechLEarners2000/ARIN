@@ -48,6 +48,12 @@ interface ArinNativeBridge {
   startBackgroundWakeWord(): Promise<boolean>;
   stopBackgroundWakeWord(): Promise<boolean>;
   isBackgroundWakeWordActive(): Promise<boolean>;
+  // Tilt Sensor & Orientation & Immersive & Music
+  setScreenOrientation(landscape: boolean): Promise<boolean>;
+  setFullscreenImmersive(enable: boolean): Promise<boolean>;
+  startTiltSensor(): Promise<boolean>;
+  stopTiltSensor(): Promise<boolean>;
+  playPhoneMusic(): Promise<boolean>;
 }
 
 /**
@@ -69,6 +75,25 @@ export function onWakeWordDetected(handler: (transcript: string) => void): () =>
   const emitter = new NativeEventEmitter(NativeModules.ArinNative);
   const sub = emitter.addListener('WakeWordDetected', (transcript: string) => {
     handler(transcript);
+  });
+  return () => sub.remove();
+}
+
+export interface TiltData {
+  pitch: number;
+  roll: number;
+  ax: number;
+  ay: number;
+  az: number;
+}
+
+/** Subscribe to accelerometer tilt events ("DeviceTilt"). */
+export function onDeviceTilt(handler: (data: TiltData) => void): () => void {
+  if (Platform.OS !== 'android' || !NativeModules.ArinNative) return () => {};
+  const { NativeEventEmitter } = require('react-native');
+  const emitter = new NativeEventEmitter(NativeModules.ArinNative);
+  const sub = emitter.addListener('DeviceTilt', (data: TiltData) => {
+    handler(data);
   });
   return () => sub.remove();
 }

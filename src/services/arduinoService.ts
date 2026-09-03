@@ -139,6 +139,34 @@ async function writeAndRead(command: string, timeoutMs: number = SERIAL_TIMEOUT_
 // ---------------------------------------------------------------------------
 
 /**
+ * Send a directional move command with a custom speed (0-255).
+ */
+export async function sendArduinoSpeedCommand(
+  action: 'FWD' | 'BACK' | 'LEFT' | 'RIGHT',
+  speed: number,
+  isConnected: boolean
+): Promise<ArduinoCommandResult> {
+  if (!isConnected) {
+    return { success: false, message: `Robot not connected` };
+  }
+  const clampedSpeed = Math.max(0, Math.min(255, Math.round(speed)));
+  const prefixMap: Record<string, string> = {
+    FWD: 'MOVE:FWD:',
+    BACK: 'MOVE:BACK:',
+    LEFT: 'TURN:LEFT:',
+    RIGHT: 'TURN:RIGHT:',
+  };
+  const wire = `${prefixMap[action]}${clampedSpeed}`;
+  try {
+    const response = await writeAndRead(wire);
+    return parseResponse(response, `Move ${action} at speed ${clampedSpeed}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, message: `Move ${action} failed: ${msg}` };
+  }
+}
+
+/**
  * Send a command token to the Arduino and wait for its response.
  */
 export async function sendArduinoCommand(

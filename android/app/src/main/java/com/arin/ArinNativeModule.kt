@@ -6,12 +6,18 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
@@ -1163,5 +1169,167 @@ class ArinNativeModule(reactContext: ReactApplicationContext) :
   @ReactMethod
   fun isBackgroundWakeWordActive(promise: Promise) {
     promise.resolve(ArinForegroundService.isServiceRunning)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tilt Motion Sensor & Orientation Control
+  // ---------------------------------------------------------------------------
+
+  private var sensorManager: SensorManager? = null
+  private var accelerometer: Sensor? = null
+  private var tiltListener: SensorEventListener? = null
+  private var lastTiltEmitMs: Long = 0L
+
+  private var toneGenerator: ToneGenerator? = null
+
+  @ReactMethod
+  fun playPhoneMusic(promise: Promise) {
+    try {
+      Thread {
+        try {
+          if (toneGenerator == null) {
+            toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+          }
+          val tg = toneGenerator!!
+          val notes = intArrayOf(
+            ToneGenerator.TONE_DTMF_1,
+            ToneGenerator.TONE_DTMF_3,
+            ToneGenerator.TONE_DTMF_5,
+            ToneGenerator.TONE_DTMF_8,
+            ToneGenerator.TONE_PROP_BEEP,
+            ToneGenerator.TONE_DTMF_5,
+            ToneGenerator.TONE_DTMF_8,
+            ToneGenerator.TONE_PROP_PROMPT
+          )
+          for (note in notes) {
+            tg.startTone(note, 130)
+            Thread.sleep(150)
+          }
+        } catch (_: Exception) {}
+      }.start()
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("MUSIC_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun setScreenOrientation(landscape: Boolean, promise: Promise) {
+    try {
+      val act = reactApplicationContext.currentActivity
+      if (act != null) {
+        act.requestedOrientation = if (landscape) {
+          ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+          ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        promise.resolve(true)
+      } else {
+        promise.resolve(false)
+      }
+    } catch (e: Exception) {
+      promise.reject("ORIENTATION_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun setFullscreenImmersive(enable: Boolean, promise: Promise) {
+    try {
+      val act = reactApplicationContext.currentActivity
+      act?.runOnUiThread {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+          val window = act.window
+          val controller = window.insetsController
+          if (controller != null) {
+            if (enable) {
+              controller.hide(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
+              controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+              controller.show(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
+            }
+          }
+        } else {
+          @Suppress("DEPRECATION")
+          val decorView = act.window.decorView
+          if (enable) {
+            decorView.systemUiVisibility = (
+              android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+              or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+              or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+              or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+              or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+              or android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            )
+          } else {
+            decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_VISIBLE
+          }
+        }
+      }
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("IMMERSIVE_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun startTiltSensor(promise: Promise) {
+    try {
+      if (sensorManager == null) {
+        sensorManager = reactApplicationContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+      }
+      if (accelerometer == null) {
+        accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+      }
+      if (accelerometer == null) {
+        promise.reject("NO_ACCELEROMETER", "Accelerometer sensor not found on this device")
+        return
+      }
+
+      if (tiltListener == null) {
+        tiltListener = object : SensorEventListener {
+          override fun onSensorChanged(event: SensorEvent?) {
+            if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+            val now = System.currentTimeMillis()
+            if (now - lastTiltEmitMs < 80) return // ~12 fps throttle
+            lastTiltEmitMs = now
+
+            val ax = event.values[0]
+            val ay = event.values[1]
+            val az = event.values[2]
+
+            val pitch = Math.toDegrees(Math.atan2(-ax.toDouble(), Math.sqrt((ay * ay + az * az).toDouble())))
+            val roll = Math.toDegrees(Math.atan2(ay.toDouble(), az.toDouble()))
+
+            val map = Arguments.createMap()
+            map.putDouble("pitch", pitch)
+            map.putDouble("roll", roll)
+            map.putDouble("ax", ax.toDouble())
+            map.putDouble("ay", ay.toDouble())
+            map.putDouble("az", az.toDouble())
+
+            sendEvent("DeviceTilt", map)
+          }
+
+          override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        sensorManager?.registerListener(tiltListener, accelerometer, SensorManager.SENSOR_DELAY_GAME)
+      }
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("START_TILT_FAILED", e.message)
+    }
+  }
+
+  @ReactMethod
+  fun stopTiltSensor(promise: Promise) {
+    try {
+      tiltListener?.let {
+        sensorManager?.unregisterListener(it)
+        tiltListener = null
+      }
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("STOP_TILT_FAILED", e.message)
+    }
   }
 }

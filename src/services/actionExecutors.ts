@@ -1,4 +1,3 @@
-import { RuleAction } from '../types';
 import { sendArduinoCommand, queryRobotBuzzerStatus as queryBuzzerReal } from './arduinoService';
 import { arinNative } from './nativeDeviceModule';
 
@@ -71,7 +70,7 @@ export function interpolateTemplate(
  * Execute a single action in a rule chain safely.
  */
 export async function executeRuleAction(
-  action: RuleAction,
+  action: any,
   context: ActionExecutionContext = {}
 ): Promise<ActionResult> {
   const log = context.onLog ?? (() => {});

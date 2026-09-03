@@ -24,6 +24,7 @@ export const SettingsScreen: React.FC = () => {
     themeMode,
     toggleThemeMode,
     themeColors,
+    setIsControllerOpen,
   } = useApp();
 
   const isConnecting = settings.localAiStatus === 'connecting';
@@ -80,6 +81,39 @@ export const SettingsScreen: React.FC = () => {
       <Text style={[typography.headlineMd, { color: themeColors.primaryContainer }]}>
         SYSTEM CONFIGURATION
       </Text>
+
+      {/* Fullscreen Landscape Controller Card */}
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: themeColors.surfaceContainerLow,
+            borderColor: themeColors.primaryContainer,
+            borderWidth: 1.5,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={[typography.headlineMd, styles.cardTitle, { color: themeColors.onSurface }]}>
+            Robot Remote Controller
+          </Text>
+          <Text style={[typography.labelCaps, { color: themeColors.primaryContainer }]}>
+            LANDSCAPE MODE
+          </Text>
+        </View>
+        <Text style={[typography.bodyMd, { color: themeColors.onSurfaceVariant }]}>
+          Launch immersive fullscreen landscape drive cockpit with Touch D-Pad / Motion Angle Detection (Gyroscope) + AI Voice Mic.
+        </Text>
+        <TouchableOpacity
+          style={[styles.connectBtn, { backgroundColor: themeColors.primaryContainer }]}
+          onPress={() => setIsControllerOpen(true)}
+          activeOpacity={0.8}
+        >
+          <Text style={[typography.labelCaps, { color: themeColors.onPrimary, fontWeight: 'bold' }]}>
+            🎮 LAUNCH LANDSCAPE DRIVE COCKPIT
+          </Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Theme Selection Card */}
       <View
