@@ -73,3 +73,14 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# ARIN robot firmware / misc artifacts
+*.deb
+*.mp4
+/arduino_motor/build/
+/arduino_motor/test/
+/google-flow-mcp/
+/.playwright-mcp/
+/fix.md
+/docs/idea
+/docs/code.md
