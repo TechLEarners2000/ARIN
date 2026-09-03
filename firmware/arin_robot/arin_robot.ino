@@ -26,6 +26,14 @@ const int LED_PIN = 13; // Built-in LED
 // Safety & Timing Constants
 const unsigned long SENSOR_INTERVAL_MS = 100;
 const int OBSTACLE_THRESHOLD_CM = 20;
+const int OBSTACLE_CLOSE_CM = 10;
+const int AVOID_TURN_SPEED = 150;
+const int BACKUP_SPEED = 120;
+const unsigned long BACKUP_DURATION_MS = 300;
+const unsigned long AVOID_TURN_DURATION_MS = 400;
+
+// Left Motor Power Compensation (left motors have higher RPM)
+const float LEFT_POWER_FACTOR = 0.80;
 
 // Non-blocking Timer Variables
 unsigned long lastSensorTime = 0;
@@ -36,6 +44,13 @@ bool buzzerActive = false;
 bool isMoving = false;
 bool obstacleState = false;
 bool ledActive = false;
+
+// Obstacle Avoidance State
+bool avoidTurning = false;
+bool avoidBackingUp = false;
+unsigned long avoidEndTime = 0;
+int avoidDirection = 1;    // 1 = turn left, -1 = turn right (alternates)
+bool wasMovingForward = false;
 
 // Non-blocking Serial Line Buffer
 const size_t BUFFER_SIZE = 64;
@@ -51,6 +66,7 @@ void turnRight(int speed);
 void startBuzzer(unsigned long durationMs);
 void updateBuzzer();
 void checkObstacle();
+void startAvoidTurn();
 long readDistanceCm();
 void processCommand(char* cmdLine);
 
@@ -128,6 +144,15 @@ void loop() {
     checkObstacle();
   }
 
+  // 2b. Manage avoidance maneuver timing
+  if (avoidBackingUp && millis() >= avoidEndTime) {
+    avoidBackingUp = false;
+    startAvoidTurn();
+  }
+  if (avoidTurning && millis() >= avoidEndTime) {
+    avoidTurning = false;
+  }
+
   // 3. Non-blocking Buzzer Off Timer
   updateBuzzer();
 }
@@ -160,15 +185,26 @@ void processCommand(char* cmdLine) {
     if (colon && colon != copy + 8) speed = atoi(colon + 1);
     speed = constrain(speed, 0, 255);
 
-    // Block forward movement if obstacle currently present
+    // Read distance — if obstacle, begin avoidance immediately
     long dist = readDistanceCm();
     if (dist > 0 && dist < OBSTACLE_THRESHOLD_CM) {
-      motorsStop();
+      wasMovingForward = true;
+      if (dist < OBSTACLE_CLOSE_CM) {
+        motorsBackward(BACKUP_SPEED);
+        avoidBackingUp = true;
+        avoidEndTime = millis() + BACKUP_DURATION_MS;
+        startBuzzer(150);
+      } else {
+        startAvoidTurn();
+      }
+      if (!obstacleState) {
+        obstacleState = true;
+      }
       Serial.print("OBSTACLE:");
       Serial.println(dist);
-      obstacleState = true;
     } else {
       motorsForward(speed);
+      wasMovingForward = true;
       Serial.print("OK:MOVE:FWD:");
       Serial.println(speed);
     }
@@ -245,16 +281,24 @@ void processCommand(char* cmdLine) {
   }
 }
 
-// Independent Safety Layer (Edge-triggered OBSTACLE/CLEAR alerts)
+// Independent Safety Layer (Autonomous Obstacle Avoidance)
 void checkObstacle() {
   long dist = readDistanceCm();
   bool isObstacle = (dist > 0 && dist < OBSTACLE_THRESHOLD_CM);
 
-  if (isObstacle) {
-    if (isMoving) {
-      motorsStop();
-      startBuzzer(200); // Brief alert tone
+  if (isObstacle && isMoving && wasMovingForward) {
+    if (dist > 0 && dist < OBSTACLE_CLOSE_CM && !avoidTurning && !avoidBackingUp) {
+      // Very close: back up first then turn
+      motorsBackward(BACKUP_SPEED);
+      avoidBackingUp = true;
+      avoidTurning = false;
+      avoidEndTime = millis() + BACKUP_DURATION_MS;
+      startBuzzer(150);
+    } else if (!avoidTurning && !avoidBackingUp) {
+      // Within threshold but not critical: turn now
+      startAvoidTurn();
     }
+
     if (!obstacleState) {
       obstacleState = true;
       Serial.print("OBSTACLE:");
@@ -266,6 +310,20 @@ void checkObstacle() {
       Serial.println("CLEAR");
     }
   }
+}
+
+// Begin an avoidance turn (alternates left/right)
+void startAvoidTurn() {
+  if (avoidDirection == 1) {
+    turnLeft(AVOID_TURN_SPEED);
+    Serial.println("AVOID:LEFT");
+  } else {
+    turnRight(AVOID_TURN_SPEED);
+    Serial.println("AVOID:RIGHT");
+  }
+  avoidDirection *= -1; // alternate for next time
+  avoidTurning = true;
+  avoidEndTime = millis() + AVOID_TURN_DURATION_MS;
 }
 
 // Non-blocking HC-SR04 Ultrasonic Distance Ping
@@ -304,6 +362,9 @@ void motorsStop() {
   analogWrite(ENA, 0);
   analogWrite(ENB, 0);
   isMoving = false;
+  wasMovingForward = false;
+  avoidTurning = false;
+  avoidBackingUp = false;
 }
 
 void motorsForward(int speed) {
@@ -311,7 +372,7 @@ void motorsForward(int speed) {
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
   digitalWrite(IN4, LOW);
-  analogWrite(ENA, speed);
+  analogWrite(ENA, (int)(speed * LEFT_POWER_FACTOR));
   analogWrite(ENB, speed);
   isMoving = true;
 }
@@ -321,7 +382,7 @@ void motorsBackward(int speed) {
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
-  analogWrite(ENA, speed);
+  analogWrite(ENA, (int)(speed * LEFT_POWER_FACTOR));
   analogWrite(ENB, speed);
   isMoving = true;
 }
@@ -331,7 +392,7 @@ void turnLeft(int speed) {
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, HIGH);
   digitalWrite(IN4, LOW);
-  analogWrite(ENA, speed);
+  analogWrite(ENA, (int)(speed * LEFT_POWER_FACTOR));
   analogWrite(ENB, speed);
   isMoving = true;
 }
@@ -341,7 +402,7 @@ void turnRight(int speed) {
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
-  analogWrite(ENA, speed);
+  analogWrite(ENA, (int)(speed * LEFT_POWER_FACTOR));
   analogWrite(ENB, speed);
   isMoving = true;
 }
