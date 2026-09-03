@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ARIN Robot — Motor-Only Serial Test
-For the minimal motor controller firmware (arduino_motor/arduino_motor.ino).
-Drives individual motors and both-motor movements. Useful for wiring checks
-and verifying the LEFT_POWER_FACTOR motor balance.
+ARIN Robot — Serial Test/Debug Tool
+Connects to the Arduino over USB serial and lets you drive the robot,
+query the ultrasonic sensor, buzz, test the LED, and exercise obstacle
+avoidance. Works with the full firmware (firmware/arin_robot/arin_robot.ino).
 
 Requires: pip install pyserial
 Usage:    python3 firmware/motor_test.py [PORT] [BAUD]
@@ -25,12 +25,20 @@ def drain(ser):
             print("Arduino >", line)
 
 
-def cmd(ser, text, wait=0.3):
+def cmd(ser, text, wait=0.4):
     ser.reset_input_buffer()
     ser.write((text + "\n").encode())
     ser.flush()
     time.sleep(wait)
     drain(ser)
+
+
+def clamp_speed(value):
+    try:
+        speed = int(value)
+    except (TypeError, ValueError):
+        return 200
+    return min(255, max(0, speed))
 
 
 def main():
@@ -50,15 +58,17 @@ def main():
     drain(ser)
 
     print("\n================================")
-    print("   ARIN MOTOR TEST")
+    print("   ARIN ROBOT SERIAL CONTROLLER")
     print("================================")
     print("Commands:")
-    print("  MOVE:FWD:100 / MOVE:BACK:100")
-    print("  TURN:LEFT:100 / TURN:RIGHT:100")
-    print("  LEFT:FWD:100 / LEFT:BACK:100")
-    print("  RIGHT:FWD:100 / RIGHT:BACK:100")
+    print("  MOVE:FWD:150        Forward (obstacle auto-avoid turns L/R)")
+    print("  MOVE:BACK:150       Backward")
+    print("  TURN:LEFT:150 / TURN:RIGHT:150")
     print("  STOP")
-    print("  STATUS")
+    print("  GET_DISTANCE        Ping ultrasonic sensor")
+    print("  GET_STATUS          Full robot state")
+    print("  BEEP:500            Buzz 500ms")
+    print("  LED:ON / LED:OFF")
     print("  EXIT\n")
 
     try:
@@ -72,8 +82,16 @@ def main():
             if not text:
                 continue
 
-            if text.upper() == "EXIT":
+            upper = text.upper()
+
+            if upper == "EXIT":
                 break
+
+            # Normalize motor commands: constrain speed to 0-255
+            if upper.startswith("MOVE:") or upper.startswith("TURN:"):
+                parts = upper.split(":")
+                if len(parts) == 3:
+                    text = f"{parts[0]}:{parts[1]}:{clamp_speed(parts[2])}"
 
             cmd(ser, text)
 
