@@ -290,8 +290,27 @@ export const ControllerScreen: React.FC<ControllerScreenProps> = ({ onClose }) =
   });
 
   return (
-    <View style={[styles.container, { backgroundColor: themeColors.background }]}>
+    <View style={[styles.container, { backgroundColor: '#05070a' }]}>
       <StatusBar hidden />
+
+      {/* LIVE CAMERA FEED BACKGROUND LAYER */}
+      <View style={StyleSheet.absoluteFill}>
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0c1018', justifyContent: 'center', alignItems: 'center' }]}>
+          <Text style={[typography.codeSm, { color: 'rgba(0,240,255,0.4)', letterSpacing: 2 }]}>
+            [LIVE CAMERA STREAM — MAIN DEVICE A]
+          </Text>
+        </View>
+        {/* AR Target Reticle Overlay */}
+        <View style={{ position: 'absolute', top: '50%', left: '50%', transform: [{ translateX: -60 }, { translateY: -60 }], width: 120, height: 120, borderRadius: 60, borderWidth: 1, borderColor: 'rgba(0,240,255,0.3)', borderStyle: 'dashed', justifyContent: 'center', alignItems: 'center' }}>
+          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: 'rgba(0,240,255,0.7)' }} />
+        </View>
+        {/* Vision Bounding Box Overlay */}
+        <View style={{ position: 'absolute', top: '25%', left: '35%', width: '30%', height: '40%', borderWidth: 1.5, borderColor: '#00f0ff', borderRadius: 4, padding: 4 }}>
+          <Text style={[typography.codeSm, { color: '#000', backgroundColor: '#00f0ff', fontSize: 9, fontWeight: 'bold', alignSelf: 'flex-start', paddingHorizontal: 4 }]}>
+            PERSON 98%
+          </Text>
+        </View>
+      </View>
 
       {/* Top Telemetry Dashboard Bar */}
       <View style={[styles.topBar, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>

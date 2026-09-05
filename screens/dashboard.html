@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ARIN — Dashboard</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#111318;--surface:#1a1d24;--surface-c:#1e2128;--surface-h:#252830;
+  --fg:#e8eaed;--fg2:#9aa0a6;--muted:#5f6368;--border:#2a2d36;
+  --accent:#00f0ff;--accent-d:rgba(0,240,255,.15);
+  --sec:#7000ff;--sec-d:rgba(112,0,255,.15);
+  --ter:#00f990;--ter-d:rgba(0,249,144,.15);
+  --err:#ff4757;--warn:#ffc048;
+  --fd:'Hanken Grotesk',system-ui,sans-serif;
+  --fb:'Inter',system-ui,sans-serif;
+  --fm:'JetBrains Mono',ui-monospace,monospace;
+  --r-sm:8px;--r-md:12px;--r-lg:16px;--r-full:999px;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--fg);font-family:var(--fb);overflow:hidden;-webkit-font-smoothing:antialiased}
+
+.device{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bg);position:relative;overflow:hidden}
+.status-bar{height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-family:var(--fm);font-size:12px;color:var(--fg2);flex-shrink:0;z-index:10}
+.gesture-bar{height:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.gesture-bar::after{content:'';width:120px;height:4px;background:var(--fg2);border-radius:999px;opacity:.4}
+
+.app{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative}
+
+/* Header */
+.app-header{padding:8px 16px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative;overflow:hidden}
+.badges{display:flex;gap:8px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:var(--r-full);font-family:var(--fm);font-size:10px;text-transform:uppercase;letter-spacing:.05em;background:var(--surface);border:1px solid var(--border)}
+.badge .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;transition:all .3s}
+.badge.ok .dot{background:var(--ter);box-shadow:0 0 8px var(--ter)}
+.badge.wait .dot{background:var(--warn);animation:pulse 1.5s infinite}
+.badge.err .dot{background:var(--err)}
+.scanline{position:absolute;bottom:0;left:0;width:40%;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:scanMove 3s ease-in-out infinite;opacity:.5}
+
+/* Chat */
+.chat{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:12px;-webkit-overflow-scrolling:touch}
+.chat::-webkit-scrollbar{width:0}
+
+.msg{max-width:82%;animation:slideUp .4s ease-out}
+.msg.sys{align-self:center;max-width:90%;text-align:center;font-family:var(--fm);font-size:11px;color:var(--muted);padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-full);display:inline-flex;align-items:center;gap:6px;animation:slideUp .3s ease-out}
+.msg.sys .sys-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.msg.sys.status-ok .sys-dot{background:var(--ter)}
+.msg.sys.status-warn .sys-dot{background:var(--warn)}
+.msg.sys.status-err .sys-dot{background:var(--err)}
+.msg.arin{align-self:flex-start}
+.msg.user{align-self:flex-end}
+
+.bubble{padding:12px 16px;font-size:14px;line-height:1.55;border-radius:var(--r-lg);position:relative}
+.msg.arin .bubble{background:var(--surface-c);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg.arin.streaming .bubble{box-shadow:inset 2px 0 0 var(--accent),0 0 16px rgba(0,240,255,.08)}
+.msg.user .bubble{background:var(--sec-d);border:1px solid rgba(112,0,255,.25);border-bottom-right-radius:4px;color:var(--fg)}
+.msg .time{font-family:var(--fm);font-size:10px;color:var(--muted);margin-top:4px}
+.msg.arin .time{text-align:left}.msg.user .time{text-align:right}
+
+/* Typing indicator */
+.typing{display:flex;gap:4px;padding:14px 16px;align-items:center}
+.typing span{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:typingBounce 1.2s ease-in-out infinite}
+.typing span:nth-child(2){animation-delay:.15s}
+.typing span:nth-child(3){animation-delay:.3s}
+
+/* Input area */
+.input-area{padding:8px 16px 4px;flex-shrink:0}
+.input-row{display:flex;gap:8px;align-items:center}
+.chat-input{flex:1;padding:12px 16px;border-radius:var(--r-full);background:var(--surface);border:1px solid var(--border);color:var(--fg);font-size:14px;font-family:var(--fb);outline:none;transition:border-color .2s}
+.chat-input:focus{border-color:var(--accent)}
+.chat-input::placeholder{color:var(--muted)}
+.icon-btn{width:40px;height:40px;border-radius:50%;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;flex-shrink:0;font-size:18px}
+.icon-btn:active{transform:scale(.92)}
+.mic{background:var(--surface);border:1px solid var(--border);color:var(--fg2)}
+.mic.recording{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1s infinite}
+.send{background:var(--accent);color:var(--bg)}
+
+/* Bottom nav */
+.nav{display:flex;border-top:1px solid var(--border);flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,0)}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 6px;text-decoration:none;color:var(--muted);font-size:10px;font-family:var(--fb);transition:color .2s;position:relative}
+.nav-item.active{color:var(--accent)}
+.nav-item.active::before{content:'';position:absolute;top:0;left:25%;right:25%;height:2px;background:var(--accent);border-radius:0 0 2px 2px}
+.nav-item svg{width:22px;height:22px}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes scanMove{0%{left:-40%}100%{left:100%}}
+@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes typingBounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="status-bar">
+    <span id="time">12:00</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none"><path d="M1 8h2v4H1zM5 5h2v7H5zM9 3h2v9H9zM13 0h2v12h-2z" fill="currentColor" opacity=".6"/></svg>
+      <svg width="22" height="12" viewBox="0 0 22 12" fill="none"><rect x=".5" y=".5" width="18" height="11" rx="2" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="14" height="8" rx="1" fill="var(--ter)" opacity=".8"/><path d="M20 4v4a2 2 0 000-4z" fill="currentColor" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div class="app">
+    <div class="app-header">
+      <div class="badges">
+        <span class="badge ok"><span class="dot"></span>Local AI</span>
+        <span class="badge ok"><span class="dot"></span>Cloud AI</span>
+        <span class="badge wait"><span class="dot"></span>Arduino</span>
+      </div>
+      <div class="scanline"></div>
+    </div>
+
+    <div class="chat" id="chat">
+      <div class="msg sys status-ok"><span class="sys-dot"></span>ARIN connected. All systems nominal.</div>
+      <div class="msg arin streaming">
+        <div class="bubble">Hey! I'm ARIN — your AI robot companion. I can navigate spaces, avoid obstacles, and respond to your voice. What would you like to try?</div>
+        <div class="time">12:00</div>
+      </div>
+      <div class="msg user">
+        <div class="bubble">Show me what you can do</div>
+        <div class="time">12:01</div>
+      </div>
+      <div class="msg arin">
+        <div class="bubble">Start with the Controller for direct piloting, or just tell me where to go. I'm connected and ready.</div>
+        <div class="time">12:01</div>
+      </div>
+      <div class="msg sys status-warn"><span class="sys-dot"></span>Arduino BLE signal weak — move closer to your robot.</div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-row">
+        <input class="chat-input" id="chatIn" placeholder="Talk to ARIN..." onkeydown="if(event.key==='Enter')sendMsg(this.value)">
+        <button class="icon-btn mic" id="micBtn" onclick="toggleMic()">&#127908;</button>
+        <button class="icon-btn send" onclick="sendMsg(document.getElementById('chatIn').value)">&#8594;</button>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a class="nav-item active" href="dashboard.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>Dashboard</span>
+      </a>
+      <a class="nav-item" href="test.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>Test</span>
+      </a>
+      <a class="nav-item" href="controller.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="3"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/><circle cx="16" cy="10" r="1" fill="currentColor"/><circle cx="18" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="14" r="1" fill="currentColor"/><circle cx="14" cy="12" r="1" fill="currentColor"/></svg>
+        <span>Controller</span>
+      </a>
+      <a class="nav-item" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+  </div>
+  <div class="gesture-bar"></div>
+</div>
+<script>
+(function(){
+  var chat=document.getElementById('chat');
+  chat.scrollTop=chat.scrollHeight;
+
+  var responses=[
+    'Got it! Adjusting heading to 45 degrees north.',
+    'Scanning environment... I detect 3 obstacles within 2 meters.',
+    'All sensors nominal. Battery at 87%. BLE signal strong.',
+    'Moving forward 1 meter. Obstacle detected — rerouting.',
+    'Voice recognition active. I\'m listening.',
+    'Local inference: 23ms latency. Cloud backup ready.',
+    'Navigation complete. Awaiting next command.',
+    'Running diagnostics... Motors, sensors, and comms all green.'
+  ];
+
+  var sysMsgs=[
+    {text:'Arduino BLE reconnected.',cls:'status-ok'},
+    {text:'Local model loaded — 23ms avg latency.',cls:'status-ok'},
+    {text:'Cloud AI fallback enabled.',cls:'status-warn'},
+    {text:'Motor calibration complete.',cls:'status-ok'}
+  ];
+
+  window.sendMsg=function(txt){
+    if(!txt||!txt.trim())return;
+    document.getElementById('chatIn').value='';
+    addMsg(txt,'user');
+    /* show typing indicator briefly */
+    var typing=addTyping();
+    setTimeout(function(){
+      typing.remove();
+      addMsg(responses[Math.floor(Math.random()*responses.length)],'arin');
+    },600+Math.random()*800);
+  };
+
+  function addMsg(text,type){
+    var d=document.createElement('div');
+    d.className='msg '+type;
+    var now=new Date();
+    var ts=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+    if(type==='sys'){d.innerHTML='<span class="sys-dot"></span>'+text;d.className='msg sys status-ok'}
+    else{
+      d.innerHTML='<div class="bubble">'+text+'</div><div class="time">'+ts+'</div>';
+      if(type==='arin')setTimeout(function(){d.classList.remove('streaming')},1500);
+    }
+    chat.appendChild(d);
+    chat.scrollTop=chat.scrollHeight;
+  }
+
+  function addTyping(){
+    var d=document.createElement('div');
+    d.className='msg arin';
+    d.innerHTML='<div class="bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
+    chat.appendChild(d);
+    chat.scrollTop=chat.scrollHeight;
+    return d;
+  }
+
+  /* periodic inline system messages */
+  setInterval(function(){
+    if(Math.random()>.6)return;
+    var sm=sysMsgs[Math.floor(Math.random()*sysMsgs.length)];
+    addMsg(sm.text,'sys');
+    /* update status badge dot accordingly */
+    var badges=document.querySelectorAll('.badge');
+    var arduinoBadge=badges[2];
+    if(sm.cls==='status-ok'){arduinoBadge.className='badge ok';arduinoBadge.querySelector('.dot').style.animation=''}
+    else if(sm.cls==='status-warn'){arduinoBadge.className='badge wait'}
+  },12000);
+
+  window.toggleMic=function(){
+    var b=document.getElementById('micBtn');
+    b.classList.toggle('recording');
+    if(b.classList.contains('recording')){
+      setTimeout(function(){b.classList.remove('recording');sendMsg('Voice command received')},3000);
+    }
+  };
+
+  var now=new Date();document.getElementById('time').textContent=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+})();
+</script>
+</body>
+</html>

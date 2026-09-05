@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ARIN — Onboarding</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#111318;--surface:#1a1d24;--surface-c:#1e2128;--surface-h:#252830;
+  --fg:#e8eaed;--fg2:#9aa0a6;--muted:#5f6368;--border:#2a2d36;
+  --accent:#00f0ff;--accent-d:rgba(0,240,255,.15);
+  --sec:#7000ff;--sec-d:rgba(112,0,255,.15);
+  --ter:#00f990;--ter-d:rgba(0,249,144,.15);
+  --err:#ff4757;--warn:#ffc048;
+  --fd:'Hanken Grotesk',system-ui,sans-serif;
+  --fb:'Inter',system-ui,sans-serif;
+  --fm:'JetBrains Mono',ui-monospace,monospace;
+  --r-sm:8px;--r-md:12px;--r-lg:16px;--r-xl:24px;--r-full:999px;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--fg);font-family:var(--fb);overflow:hidden;-webkit-font-smoothing:antialiased}
+
+.device{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bg);position:relative;overflow:hidden}
+.status-bar{height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-family:var(--fm);font-size:12px;color:var(--fg2);flex-shrink:0;z-index:10}
+.gesture-bar{height:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.gesture-bar::after{content:'';width:120px;height:4px;background:var(--fg2);border-radius:999px;opacity:.4}
+
+.onboard{flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.skip{position:absolute;top:8px;right:16px;z-index:5;background:none;border:none;color:var(--fg2);font-family:var(--fb);font-size:14px;cursor:pointer;padding:8px;transition:color .2s}
+.skip:hover{color:var(--fg)}
+
+.cards{flex:1;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.cards::-webkit-scrollbar{display:none}
+.card{min-width:100%;scroll-snap-align:start;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 32px;text-align:center;gap:20px}
+
+/* Illustration area */
+.card-illust{width:120px;height:120px;border-radius:28px;display:flex;align-items:center;justify-content:center;position:relative;margin-bottom:4px}
+.card-illust::after{content:'';position:absolute;inset:-5px;border-radius:32px;border:1px solid;opacity:.2}
+.card-illust.cyan{background:var(--accent-d);color:var(--accent)}.card-illust.cyan::after{border-color:var(--accent)}
+.card-illust.violet{background:var(--sec-d);color:var(--sec)}.card-illust.violet::after{border-color:var(--sec)}
+.card-illust.mint{background:var(--ter-d);color:var(--ter)}.card-illust.mint::after{border-color:var(--ter)}
+.card-illust .illust-icon{font-size:48px;position:relative;z-index:1}
+.card-illust .illust-glow{position:absolute;width:80px;height:80px;border-radius:50%;filter:blur(30px);opacity:.3;animation:gPulse 3s ease-in-out infinite}
+.card-illust.cyan .illust-glow{background:var(--accent)}
+.card-illust.violet .illust-glow{background:var(--sec)}
+.card-illust.mint .illust-glow{background:var(--ter)}
+
+.card h2{font-family:var(--fd);font-size:28px;font-weight:700;letter-spacing:-.01em;line-height:1.2}
+.card p{color:var(--fg2);font-size:15px;line-height:1.6;max-width:300px}
+
+/* Permissions card 3 */
+.perms{display:flex;flex-direction:column;gap:10px;width:100%;max-width:320px;margin-top:4px}
+.perm{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);transition:border-color .3s}
+.perm.enabled{border-color:rgba(0,240,255,.25)}
+.perm-ico{width:36px;height:36px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.perm-info{flex:1;text-align:left}.perm-info .lbl{font-size:14px;font-weight:500}.perm-info .dsc{font-size:12px;color:var(--fg2);margin-top:1px}
+
+/* Toggle with pulse on enable */
+.toggle{width:44px;height:24px;border-radius:12px;background:var(--border);position:relative;cursor:pointer;transition:background .3s,box-shadow .3s;flex-shrink:0;border:none;padding:0}
+.toggle.on{background:var(--accent);box-shadow:0 0 12px rgba(0,240,255,.3)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform .3s cubic-bezier(.34,1.56,.64,1)}
+.toggle.on::after{transform:translateX(20px)}
+
+/* Pulse ring when toggled on */
+.perm.pulse{animation:permPulse .4s ease-out}
+@keyframes permPulse{0%{box-shadow:0 0 0 0 rgba(0,240,255,.4)}100%{box-shadow:0 0 0 10px rgba(0,240,255,0)}}
+
+/* Bottom controls */
+.bottom{padding:20px 32px 12px;display:flex;flex-direction:column;align-items:center;gap:16px}
+.dots{display:flex;gap:6px;align-items:center}
+.dot{width:8px;height:8px;border-radius:4px;background:var(--border);transition:all .4s cubic-bezier(.34,1.56,.64,1)}
+.dot.active{width:28px;background:var(--accent);box-shadow:0 0 8px rgba(0,240,255,.3)}
+
+/* CTA with shimmer */
+.cta{width:100%;max-width:320px;padding:16px;border:none;border-radius:var(--r-full);background:var(--accent);color:var(--bg);font-family:var(--fd);font-size:16px;font-weight:600;cursor:pointer;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s}
+.cta:active{transform:scale(.97)}.cta:hover{box-shadow:0 0 24px rgba(0,240,255,.4)}
+.cta .shim{position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.25),transparent);animation:shim 2.5s ease-in-out infinite}
+@keyframes shim{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+
+@keyframes gPulse{0%,100%{opacity:.3}50%{opacity:.5}}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="status-bar">
+    <span id="time">12:00</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none"><path d="M1 8h2v4H1zM5 5h2v7H5zM9 3h2v9H9zM13 0h2v12h-2z" fill="currentColor" opacity=".6"/></svg>
+      <svg width="22" height="12" viewBox="0 0 22 12" fill="none"><rect x=".5" y=".5" width="18" height="11" rx="2" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="14" height="8" rx="1" fill="var(--ter)" opacity=".8"/><path d="M20 4v4a2 2 0 000-4z" fill="currentColor" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div class="onboard">
+    <button class="skip" onclick="location.href='dashboard.html'">Skip</button>
+    <div class="cards" id="cards">
+      <!-- Slide 1: Meet ARIN -->
+      <div class="card">
+        <div class="card-illust cyan">
+          <div class="illust-glow"></div>
+          <span class="illust-icon">&#129302;</span>
+        </div>
+        <h2>Meet ARIN</h2>
+        <p>Your AI-powered robot companion. Talk naturally, give commands, and watch your robot come to life.</p>
+      </div>
+      <!-- Slide 2: Connect -->
+      <div class="card">
+        <div class="card-illust violet">
+          <div class="illust-glow"></div>
+          <span class="illust-icon">&#128225;</span>
+        </div>
+        <h2>Connect Your Robot</h2>
+        <p>Pair your Arduino-based robot over BLE or USB. ARIN handles the communication seamlessly.</p>
+      </div>
+      <!-- Slide 3: Permissions -->
+      <div class="card">
+        <div class="card-illust mint">
+          <div class="illust-glow"></div>
+          <span class="illust-icon">&#128737;</span>
+        </div>
+        <h2>Grant Permissions</h2>
+        <p>ARIN needs access to a few features to work its magic.</p>
+        <div class="perms">
+          <div class="perm" id="perm-cam">
+            <div class="perm-ico" style="background:var(--accent-d);color:var(--accent)">&#128247;</div>
+            <div class="perm-info"><div class="lbl">Camera</div><div class="dsc">AR view &amp; visual navigation</div></div>
+            <button class="toggle" onclick="togglePerm(this)"></button>
+          </div>
+          <div class="perm" id="perm-ble">
+            <div class="perm-ico" style="background:var(--sec-d);color:var(--sec)">&#128246;</div>
+            <div class="perm-info"><div class="lbl">Bluetooth</div><div class="dsc">Connect to your robot</div></div>
+            <button class="toggle" onclick="togglePerm(this)"></button>
+          </div>
+          <div class="perm" id="perm-mic">
+            <div class="perm-ico" style="background:var(--ter-d);color:var(--ter)">&#127908;</div>
+            <div class="perm-info"><div class="lbl">Microphone</div><div class="dsc">Voice commands &amp; chat</div></div>
+            <button class="toggle" onclick="togglePerm(this)"></button>
+          </div>
+        </div>
+      </div>
+      <!-- Slide 4: Ready -->
+      <div class="card">
+        <div class="card-illust cyan">
+          <div class="illust-glow"></div>
+          <span class="illust-icon">&#9889;</span>
+        </div>
+        <h2>You're All Set</h2>
+        <p>ARIN is ready to go. Start chatting, explore the controller, or run test commands.</p>
+      </div>
+    </div>
+    <div class="bottom">
+      <div class="dots" id="dots"><div class="dot active"></div><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+      <button class="cta" id="cta" onclick="next()"><span class="shim"></span><span id="ctaTxt">Next</span></button>
+    </div>
+  </div>
+  <div class="gesture-bar"></div>
+</div>
+<script>
+(function(){
+  var c=document.getElementById('cards'),dots=document.querySelectorAll('.dot'),txt=document.getElementById('ctaTxt'),cur=0,tot=4;
+
+  c.addEventListener('scroll',function(){
+    var i=Math.round(c.scrollLeft/c.offsetWidth);
+    if(i!==cur){cur=i;dots.forEach(function(d,j){d.classList.toggle('active',j===cur)});txt.textContent=cur===tot-1?'Get Started':'Next'}
+  });
+
+  window.next=function(){
+    if(cur<tot-1){cur++;c.scrollTo({left:cur*c.offsetWidth,behavior:'smooth'});dots.forEach(function(d,j){d.classList.toggle('active',j===cur)});txt.textContent=cur===tot-1?'Get Started':'Next'}
+    else location.href='dashboard.html';
+  };
+
+  window.togglePerm=function(btn){
+    btn.classList.toggle('on');
+    var perm=btn.closest('.perm');
+    perm.classList.toggle('enabled',btn.classList.contains('on'));
+    /* confetti-free pulse */
+    perm.classList.remove('pulse');
+    void perm.offsetWidth;
+    if(btn.classList.contains('on'))perm.classList.add('pulse');
+  };
+
+  var now=new Date();document.getElementById('time').textContent=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+})();
+</script>
+</body>
+</html>

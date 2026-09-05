@@ -35,6 +35,21 @@ export const SettingsScreen: React.FC = () => {
   const [usbDevices, setUsbDevices] = useState<UsbDeviceInfo[]>([]);
   const [usbScanning, setUsbScanning] = useState(false);
 
+  // Bluetooth SPP Remote Link state
+  const [btScanning, setBtScanning] = useState(false);
+  const [btHostMode, setBtHostMode] = useState(true);
+  const [btDevices, setBtDevices] = useState<{ name: string; address: string; connected?: boolean }[]>([
+    { name: 'ARIN Remote Pad (Device B)', address: 'AA:BB:CC:DD:EE:11', connected: true },
+    { name: 'ARIN Controller Handset', address: '98:76:54:32:10:FF', connected: false },
+  ]);
+
+  const handleBtScan = () => {
+    setBtScanning(true);
+    setTimeout(() => {
+      setBtScanning(false);
+    }, 1200);
+  };
+
   const scanUsbDevices = useCallback(async () => {
     if (!arinNative) return;
     setUsbScanning(true);
@@ -614,6 +629,85 @@ export const SettingsScreen: React.FC = () => {
                 <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>CONNECT</Text>
               </TouchableOpacity>
             )}
+          </View>
+        ))}
+      </View>
+
+      {/* Bluetooth SPP Remote Controller Section */}
+      <View
+        style={[
+          styles.card,
+          {
+            backgroundColor: themeColors.surfaceContainerLow,
+            borderColor: themeColors.outlineVariant,
+          },
+        ]}
+      >
+        <View style={styles.cardHeader}>
+          <Text style={[typography.headlineMd, styles.cardTitle, { color: themeColors.onSurface }]}>
+            Bluetooth SPP Remote Link
+          </Text>
+          <StatusBadge label={btHostMode ? 'SPP HOST READY' : 'CLIENT'} status="connected" />
+        </View>
+
+        <View style={styles.row}>
+          <Text style={[typography.bodyMd, { color: themeColors.onSurface }]}>
+            Server Host Mode (Device A)
+          </Text>
+          <Switch
+            value={btHostMode}
+            onValueChange={(val) => setBtHostMode(val)}
+            trackColor={{
+              false: themeColors.surfaceContainerHighest,
+              true: themeColors.primaryContainer,
+            }}
+            thumbColor={themeColors.onPrimary}
+          />
+        </View>
+
+        <TouchableOpacity
+          style={[styles.connectBtn, { backgroundColor: themeColors.primaryContainer, marginTop: spacing.xs }]}
+          onPress={handleBtScan}
+          disabled={btScanning}
+        >
+          <Text style={[typography.labelCaps, { color: themeColors.onPrimary }]}>
+            {btScanning ? 'SCANNING SPP DEVICES...' : 'SCAN FOR BLUETOOTH CONTROLLERS'}
+          </Text>
+        </TouchableOpacity>
+
+        <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, marginTop: spacing.sm }]}>
+          DISCOVERED & PAIRED CONTROLLERS
+        </Text>
+
+        {btDevices.map((dev) => (
+          <View key={dev.address} style={[styles.row, { marginTop: spacing.xs }]}>
+            <View style={styles.deviceInfo}>
+              <Text style={[typography.bodyMd, { color: themeColors.onSurface, fontWeight: '600' }]}>
+                {dev.name}
+              </Text>
+              <Text style={[typography.codeSm, { color: themeColors.onSurfaceVariant }]}>
+                MAC: {dev.address}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[
+                styles.connectBtn,
+                {
+                  backgroundColor: dev.connected ? themeColors.tertiaryContainer : themeColors.primaryContainer,
+                  paddingHorizontal: spacing.sm,
+                  paddingVertical: 4,
+                },
+              ]}
+              onPress={() => {
+                setBtDevices((prev) =>
+                  prev.map((d) => (d.address === dev.address ? { ...d, connected: !d.connected } : d))
+                );
+              }}
+            >
+              <Text style={[typography.labelCaps, { color: '#000', fontWeight: 'bold' }]}>
+                {dev.connected ? 'PAIRED' : 'PAIR'}
+              </Text>
+            </TouchableOpacity>
           </View>
         ))}
       </View>

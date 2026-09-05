@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>ARIN — Controller</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0c10;--surface:rgba(17,19,24,.55);--surface-c:rgba(30,33,40,.55);--surface-h:#252830;
+  --fg:#e8eaed;--fg2:#9aa0a6;--muted:#5f6368;--border:rgba(42,45,54,.6);
+  --accent:#00f0ff;--accent-d:rgba(0,240,255,.12);
+  --sec:#7000ff;--sec-d:rgba(112,0,255,.12);
+  --ter:#00f990;--ter-d:rgba(0,249,144,.12);
+  --err:#ff4757;--warn:#ffc048;
+  --fd:'Hanken Grotesk',system-ui,sans-serif;
+  --fb:'Inter',system-ui,sans-serif;
+  --fm:'JetBrains Mono',ui-monospace,monospace;
+  --r-full:999px;
+}
+html,body{width:100%;height:100%;background:#000;color:var(--fg);font-family:var(--fb);overflow:hidden;-webkit-font-smoothing:antialiased;touch-action:none;position:fixed;inset:0}
+
+/* Landscape-only */
+.rot-lock{position:fixed;inset:0;z-index:200;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:32px}
+.rot-lock .icon{font-size:56px;color:var(--accent)}
+.rot-lock h2{font-family:var(--fd);font-size:22px;font-weight:700}
+.rot-lock p{color:var(--fg2);font-size:14px;line-height:1.6}
+
+.controller{width:100%;height:100%;position:relative;overflow:hidden;background:linear-gradient(180deg,#0a0c10 0%,#111318 40%,#0d1017 100%)}
+
+/* Camera / AR stage */
+.ar-bg{position:absolute;inset:0;overflow:hidden;background:
+  radial-gradient(120% 80% at 50% 30%, rgba(40,46,58,.6), rgba(10,12,16,.9)),
+  repeating-linear-gradient(90deg, rgba(60,70,90,.25) 0 1px, transparent 1px 90px),
+  repeating-linear-gradient(0deg, rgba(60,70,90,.18) 0 1px, transparent 1px 60px)}
+.ar-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(0,240,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(0,240,255,.035) 1px,transparent 1px);background-size:40px 40px;perspective:600px;transform:rotateX(50deg);transform-origin:center 62%;opacity:.5}
+.ar-vignette{position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,.55) 100%)}
+.ar-topvign{position:absolute;top:0;left:0;right:0;height:96px;background:linear-gradient(180deg,rgba(0,0,0,.6),transparent)}
+.ar-botvign{position:absolute;bottom:0;left:0;right:0;height:96px;background:linear-gradient(0deg,rgba(0,0,0,.6),transparent)}
+
+/* Reticle (AR lock) */
+.reticle{position:absolute;top:56%;left:50%;transform:translate(-50%,-50%);width:110px;height:110px;border:1px solid rgba(0,240,255,.18);border-radius:50%;opacity:.6;animation:reticlePulse 3.2s ease-in-out infinite;transition:opacity .6s}
+.reticle.hidden{opacity:0}
+.reticle::before,.reticle::after{content:'';position:absolute;background:rgba(0,240,255,.2)}
+.reticle::before{width:1px;height:18px;top:50%;left:50%;transform:translate(-50%,-50%)}
+.reticle::after{width:18px;height:1px;top:50%;left:50%;transform:translate(-50%,-50%)}
+.reticle .corner{position:absolute;width:14px;height:14px;border:1.5px solid rgba(0,240,255,.4)}
+.reticle .corner.tl{top:-2px;left:-2px;border-right:none;border-bottom:none;border-radius:4px 0 0 0}
+.reticle .corner.tr{top:-2px;right:-2px;border-left:none;border-bottom:none;border-radius:0 4px 0 0}
+.reticle .corner.bl{bottom:-2px;left:-2px;border-right:none;border-top:none;border-radius:0 0 0 4px}
+.reticle .corner.br{bottom:-2px;right:-2px;border-left:none;border-top:none;border-radius:0 0 4px 0}
+
+/* Robot 3D model */
+.robot{position:absolute;top:56%;left:50%;transform:translate(-50%,-55%);width:150px;height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;transition:transform .2s ease}
+.robot .body{width:96px;height:64px;background:linear-gradient(135deg,#2a3138,#1a1d24);border:1.5px solid #3a424c;border-radius:14px;position:relative;display:flex;align-items:center;justify-content:center;box-shadow:0 16px 44px rgba(0,0,0,.55),0 0 30px rgba(0,240,255,.12);transform:rotateX(4deg)}
+.robot .body::before{content:'';position:absolute;inset:0;border-radius:14px;background:linear-gradient(160deg,rgba(255,255,255,.06),transparent 45%);pointer-events:none}
+.robot .headlight{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:34px;height:12px;border-radius:4px;background:rgba(255,255,255,.12);box-shadow:inset 0 0 6px rgba(255,255,255,.1)}
+.robot .headlight.on{background:var(--accent);box-shadow:0 0 14px var(--accent),0 0 30px rgba(0,240,255,.4)}
+.robot .eye{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent),0 0 30px rgba(0,240,255,.35);animation:eyeBreathe 2.2s ease-in-out infinite}
+.robot .turret{position:absolute;top:-14px;left:50%;transform:translateX(-50%) rotate(0deg);width:34px;height:8px;background:#2a3138;border:1px solid #3a424c;border-radius:4px;transform-origin:center 30px;transition:transform .1s linear}
+.robot .turret::after{content:'';position:absolute;right:-8px;top:50%;transform:translateY(-50%);width:10px;height:3px;background:#3a424c;border-radius:2px}
+.robot .track{display:flex;gap:56px;margin-top:-6px}
+.robot .track span{width:34px;height:10px;background:#2a3138;border:1px solid #3a424c;border-radius:5px;position:relative;overflow:hidden}
+.robot .track span::after{content:'';position:absolute;top:50%;left:0;width:60px;height:2px;background:rgba(0,240,255,.25);transform:translateY(-50%);animation:trackRoll 1s linear infinite}
+.robot .shadow{position:absolute;bottom:-14px;width:100px;height:12px;background:radial-gradient(ellipse,rgba(0,0,0,.7),transparent 70%);border-radius:50%}
+
+/* ===== HUD ===== */
+.hud{position:absolute;top:0;left:0;right:0;padding:12px 16px 0;display:flex;flex-direction:column;gap:8px;z-index:10;pointer-events:none}
+.hud-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hud-center{position:absolute;top:12px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;align-items:center;z-index:10;pointer-events:none}
+
+.hud-chip{padding:4px 10px;border-radius:var(--r-full);background:rgba(17,19,24,.8);backdrop-filter:blur(8px);border:1px solid var(--border);font-family:var(--fm);font-size:10px;display:inline-flex;align-items:center;gap:5px;color:var(--fg2);pointer-events:auto;white-space:nowrap}
+.hud-chip .dot{width:5px;height:5px;border-radius:50%;background:var(--ter);box-shadow:0 0 6px var(--ter);transition:all .3s}
+.hud-chip .dot.wait{background:var(--warn);animation:pulse 1.5s infinite}
+.hud-stat{font-family:var(--fm);font-size:10px;color:var(--fg2);white-space:nowrap}
+.hud-stat .val{color:var(--fg)}
+
+/* AR toggle */
+.ar-toggle{padding:3px 10px;border-radius:var(--r-full);background:var(--accent-d);border:1px solid rgba(0,240,255,.3);font-family:var(--fm);font-size:10px;color:var(--accent);cursor:pointer;pointer-events:auto}
+.ar-toggle.off{background:var(--surface-c);border-color:var(--border);color:var(--fg2)}
+
+/* ===== Gear selector ===== */
+.gear{display:flex;background:rgba(17,19,24,.7);backdrop-filter:blur(8px);border-radius:var(--r-full);padding:3px;border:1px solid var(--border);position:relative;pointer-events:auto}
+.gear-opt{padding:6px 16px;text-align:center;font-family:var(--fm);font-size:10px;letter-spacing:.06em;color:var(--fg2);cursor:pointer;border-radius:var(--r-full);position:relative;z-index:2;text-transform:uppercase;transition:color .3s}
+.gear-opt.active{color:var(--fg)}
+.gear-pill{position:absolute;top:3px;bottom:3px;border-radius:var(--r-full);background:var(--accent-d);border:1px solid rgba(0,240,255,.3);transition:left .3s cubic-bezier(.34,1.56,.64,1),width .3s cubic-bezier(.34,1.56,.64,1);z-index:1}
+.gear.turbo{border-color:rgba(255,192,72,.5)}
+.gear.turbo .gear-pill{background:rgba(255,192,72,.18);border-color:rgba(255,192,72,.4)}
+.gear.turbo .gear-opt.t-active{color:var(--warn)}
+
+/* Turbo edge tint */
+.edge-tint{position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 55%,rgba(255,192,72,.08));opacity:0;transition:opacity .6s;pointer-events:none;z-index:0}
+.edge-tint.on{opacity:1}
+
+/* ===== Shoulder triggers ===== */
+.shoulder{position:absolute;top:12px;padding:10px 22px;border-radius:var(--r-full);background:rgba(17,19,24,.7);backdrop-filter:blur(8px);border:1px solid var(--border);font-family:var(--fd);font-size:13px;font-weight:600;letter-spacing:.04em;color:var(--fg2);cursor:pointer;transition:all .15s;z-index:9;display:flex;align-items:center;gap:8px;pointer-events:auto}
+.shoulder::before{content:'';position:absolute;inset:0;border-radius:var(--r-full);background:var(--accent-d);opacity:0;transition:opacity .15s}
+.shoulder.active::before{opacity:1}
+.shoulder.active{border-color:var(--accent);color:var(--fg);box-shadow:0 0 18px rgba(0,240,255,.2)}
+.shoulder .key{font-family:var(--fm);font-size:10px;color:var(--muted)}
+.shoulder-l{left:16px}
+.shoulder-r{right:16px}
+.shoulder-r.active{border-color:var(--warn);box-shadow:0 0 18px rgba(255,192,72,.25)}
+
+/* ===== Minimap / radar ===== */
+.minimap{position:absolute;top:64px;left:16px;width:92px;height:92px;border-radius:50%;background:rgba(17,19,24,.55);backdrop-filter:blur(8px);border:1px solid var(--border);overflow:hidden;z-index:8}
+.minimap .scan{position:absolute;inset:0;background:conic-gradient(from 0deg,transparent,var(--accent) 15%,transparent 30%);animation:radarSweep 3s linear infinite;opacity:.35}
+.minimap .rings{position:absolute;inset:0;border-radius:50%}
+.minimap .rings::before,.minimap .rings::after{content:'';position:absolute;border:1px solid rgba(0,240,255,.12);border-radius:50%}
+.minimap .rings::before{inset:16px}.minimap .rings::after{inset:33px}
+.minimap .cross::before,.minimap .cross::after{content:'';position:absolute;background:rgba(0,240,255,.1)}
+.minimap .cross::before{left:50%;top:0;bottom:0;width:1px}.minimap .cross::after{top:50%;left:0;right:0;height:1px}
+.minimap .blip{position:absolute;top:50%;left:50%;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent);animation:radarBlip 3s ease-in-out infinite}
+.minimap .label{position:absolute;bottom:8px;left:0;right:0;text-align:center;font-family:var(--fm);font-size:8px;color:var(--muted);letter-spacing:.1em}
+
+/* ===== Joysticks ===== */
+.stick-wrap{position:absolute;bottom:36px;z-index:6}
+.stick-wrap.left{left:32px}
+.stick-wrap.right{right:32px}
+.joy-base{width:118px;height:118px;border-radius:50%;background:rgba(17,19,24,.5);backdrop-filter:blur(8px);border:1.5px solid rgba(0,240,255,.18);display:flex;align-items:center;justify-content:center;position:relative;box-shadow:0 8px 24px rgba(0,0,0,.35),inset 0 0 20px rgba(0,0,0,.3)}
+.joy-base .tick{position:absolute;background:rgba(255,255,255,.06)}
+.joy-base .tick.h{left:0;right:0;top:50%;height:1px}
+.joy-base .tick.v{top:0;bottom:0;left:50%;width:1px}
+.joy-nub{width:46px;height:46px;border-radius:50%;background:radial-gradient(circle at 35% 30%,var(--accent-d),rgba(0,240,255,.06));border:1.5px solid rgba(0,240,255,.45);box-shadow:0 0 18px rgba(0,240,255,.22);position:absolute;cursor:grab;will-change:transform}
+.joy-nub:active{cursor:grabbing;box-shadow:0 0 26px rgba(0,240,255,.4);transform:scale(1.05)}
+.joy-nub.touch{transform:scale(1.06)}
+.joy-label{position:absolute;bottom:-20px;left:50%;transform:translateX(-50%);font-family:var(--fm);font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}
+.stick-wrap.right .joy-base{border-color:rgba(112,0,255,.18)}
+.stick-wrap.right .joy-nub{border-color:rgba(112,0,255,.4);background:radial-gradient(circle at 35% 30%,var(--sec-d),rgba(112,0,255,.06));box-shadow:0 0 18px rgba(112,0,255,.22)}
+.stick-wrap.right .joy-nub:active{box-shadow:0 0 26px rgba(112,0,255,.4)}
+
+/* ===== Action button cluster (diamond above right stick) ===== */
+.action-cluster{position:absolute;right:76px;bottom:150px;width:110px;height:110px;z-index:6;pointer-events:none}
+.action-btn{width:46px;height:46px;border-radius:50%;background:rgba(17,19,24,.7);backdrop-filter:blur(8px);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;transition:all .15s;position:absolute;pointer-events:auto;color:var(--fg2)}
+.action-btn:active{transform:scale(.86);border-color:var(--accent);background:var(--accent-d);box-shadow:0 0 16px rgba(0,240,255,.3)}
+.action-btn.holding{border-color:var(--accent);background:var(--accent-d);box-shadow:0 0 16px rgba(0,240,255,.35)}
+.action-btn.danger{color:var(--err)}
+.action-btn.danger:active,.action-btn.danger.holding{border-color:var(--err);background:var(--err);color:#fff;box-shadow:0 0 16px rgba(255,71,87,.4)}
+.action-btn[data-pos="top"]{top:0;left:50%;transform:translateX(-50%)}
+.action-btn[data-pos="left"]{top:50%;left:0;transform:translateY(-50%)}
+.action-btn[data-pos="right"]{top:50%;right:0;transform:translateY(-50%)}
+.action-btn[data-pos="bottom"]{bottom:0;left:50%;transform:translateX(-50%)}
+.action-btn:active[data-pos="top"],.action-btn.holding[data-pos="top"]{transform:translateX(-50%) scale(.86)}
+.action-btn:active[data-pos="left"],.action-btn.holding[data-pos="left"]{transform:translateY(-50%) scale(.86)}
+.action-btn:active[data-pos="right"],.action-btn.holding[data-pos="right"]{transform:translateY(-50%) scale(.86)}
+.action-btn:active[data-pos="bottom"],.action-btn.holding[data-pos="bottom"]{transform:translateX(-50%) scale(.86)}
+
+/* ===== Pause button ===== */
+.pause-btn{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);width:44px;height:44px;border-radius:50%;background:rgba(17,19,24,.7);backdrop-filter:blur(8px);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;z-index:10;transition:all .2s}
+.pause-btn:active{transform:translateX(-50%) scale(.88);border-color:var(--accent)}
+.pause-btn span{width:6px;height:16px;background:var(--fg2);border-radius:2px;display:block;box-shadow:9px 0 0 var(--fg2)}
+
+/* ===== Pause overlay ===== */
+.pause-overlay{position:absolute;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;z-index:50;opacity:0;pointer-events:none;transition:opacity .3s}
+.pause-overlay.show{opacity:1;pointer-events:auto}
+.pause-overlay h2{font-family:var(--fd);font-size:26px;font-weight:800;letter-spacing:.04em;color:var(--fg)}
+.pause-overlay .sub{font-family:var(--fm);font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+.pause-btns{display:flex;gap:14px;flex-direction:column;width:220px}
+.pause-btn-l{width:100%;padding:14px;border-radius:var(--r-full);font-family:var(--fd);font-size:15px;font-weight:600;border:none;cursor:pointer;transition:all .2s;text-align:center}
+.pause-btn-l:active{transform:scale(.96)}
+.pause-resume{background:var(--accent);color:var(--bg)}
+.pause-exit{background:var(--surface-c);color:var(--fg2);border:1px solid var(--border)}
+
+/* Shock/flash on collision */
+.shock{position:absolute;inset:0;background:radial-gradient(circle at 50% 60%,rgba(255,192,72,.15),transparent 60%);opacity:0;pointer-events:none;z-index:4}
+.shock.fire{animation:shockFlash .5s ease-out}
+
+@keyframes reticlePulse{0%,100%{opacity:.3;transform:translate(-50%,-50%) scale(1)}50%{opacity:.6;transform:translate(-50%,-50%) scale(1.05)}}
+@keyframes eyeBreathe{0%,100%{box-shadow:0 0 12px var(--accent),0 0 24px rgba(0,240,255,.25)}50%{box-shadow:0 0 20px var(--accent),0 0 38px rgba(0,240,255,.4)}}
+@keyframes trackRoll{0%{transform:translateY(-50%) translateX(-20px)}100%{transform:translateY(-50%) translateX(20px)}}
+@keyframes radarSweep{to{transform:rotate(360deg)}}
+@keyframes radarBlip{0%,100%{opacity:.6}50%{opacity:1}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes shockFlash{0%{opacity:0}30%{opacity:1}100%{opacity:0}}
+</style>
+</head>
+<body>
+  <!-- Landscape rotation lock -->
+  <div class="rot-lock" id="rotLock">
+    <div class="icon">&#128260;</div>
+    <h2>Rotate to Landscape</h2>
+    <p>The ARIN Controller is a full-screen game HUD.<br>Rotate your device for the full experience.</p>
+  </div>
+
+  <div class="controller" id="ctrl">
+    <div class="edge-tint" id="edgeTint"></div>
+    <div class="shock" id="shock"></div>
+
+    <!-- AR camera stage -->
+    <div class="ar-bg">
+      <div class="ar-grid"></div>
+      <div class="ar-topvign"></div>
+      <div class="ar-botvign"></div>
+      <div class="ar-vignette"></div>
+      <div class="reticle" id="reticle">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+      </div>
+    </div>
+
+    <!-- Robot model -->
+    <div class="robot" id="robot">
+      <div class="turret" id="turret"></div>
+      <div class="body">
+        <div class="headlight" id="headlight"></div>
+        <div class="eye"></div>
+      </div>
+      <div class="track"><span></span><span></span></div>
+      <div class="shadow"></div>
+    </div>
+
+    <!-- Gear selector (top center) -->
+    <div class="hud-center">
+      <div class="gear" id="gear">
+        <div class="gear-pill" id="gearPill"></div>
+        <div class="gear-opt active" data-g="low" onclick="setGear(this)">Low</div>
+        <div class="gear-opt" data-g="norm" onclick="setGear(this)">Normal</div>
+        <div class="gear-opt" data-g="turbo" onclick="setGear(this)">Turbo</div>
+      </div>
+      <div class="hud-chip"><span class="dot" id="connDot"></span><span id="connTxt">Connected</span></div>
+    </div>
+
+    <!-- Shoulder triggers -->
+    <button class="shoulder shoulder-l" onpointerdown="pressShoulder(this)" onpointerup="releaseShoulder(this)" onpointerleave="releaseShoulder(this)">
+      <span class="key">L1</span> BRAKE
+    </button>
+    <button class="shoulder shoulder-r" onpointerdown="pressShoulder(this)" onpointerup="releaseShoulder(this)" onpointerleave="releaseShoulder(this)">
+      <span class="key">R1</span> TURBO
+    </button>
+
+    <!-- Minimap radar -->
+    <div class="minimap">
+      <div class="rings"></div>
+      <div class="cross"></div>
+      <div class="scan"></div>
+      <div class="blip" id="blip"></div>
+      <div class="label">RADAR</div>
+    </div>
+
+    <!-- HUD top strip -->
+    <div class="hud">
+      <div class="hud-row">
+        <div>
+          <div class="hud-stat">BATT <span class="val" id="battery">87</span>%</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="hud-stat">LAT <span class="val" id="latency">23</span>ms</div>
+          <div class="ar-toggle" id="arToggle" onclick="toggleAR(this)">AR</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Joystick: left (drive) -->
+    <div class="stick-wrap left">
+      <div class="joy-base" id="joyBaseL">
+        <span class="tick h"></span><span class="tick v"></span>
+        <div class="joy-nub" id="joyNubL"></div>
+      </div>
+      <div class="joy-label">Move</div>
+    </div>
+
+    <!-- Joystick: right (look / turret) -->
+    <div class="stick-wrap right">
+      <div class="joy-base" id="joyBaseR">
+        <span class="tick h"></span><span class="tick v"></span>
+        <div class="joy-nub" id="joyNubR"></div>
+      </div>
+      <div class="joy-label">Look</div>
+    </div>
+
+    <!-- Action button cluster (diamond above right stick) -->
+    <div class="action-cluster">
+      <button class="action-btn" data-pos="top" onclick="actionPress(this)">&#128266;</button>
+      <button class="action-btn" data-pos="left" onclick="actionPress(this)">&#128161;</button>
+      <button class="action-btn" data-pos="right" onclick="actionPress(this)">&#128247;</button>
+      <button class="action-btn danger" data-pos="bottom" onclick="actionPress(this)">&#9888;</button>
+    </div>
+
+    <!-- Pause -->
+    <button class="pause-btn" onclick="showPause(true)"><span></span></button>
+
+    <!-- Pause overlay -->
+    <div class="pause-overlay" id="pauseOverlay">
+      <h2>PAUSED</h2>
+      <div class="sub">Arming system suspended</div>
+      <div class="pause-btns">
+        <button class="pause-btn-l pause-resume" onclick="showPause(false)">Resume</button>
+        <button class="pause-btn-l pause-exit" onclick="location.href='dashboard.html'">Exit to Dashboard</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  var turbo=false;
+
+  /* ===== Gear selector ===== */
+  window.setGear=function(opt){
+    var gear=document.getElementById('gear'),pill=document.getElementById('gearPill'),opts=gear.querySelectorAll('.gear-opt');
+    opts.forEach(function(o){o.classList.remove('active','t-active')});
+    opt.classList.add('active');
+    if(opt.dataset.g==='turbo')opt.classList.add('t-active');
+    var i=Array.from(opts).indexOf(opt);
+    var w=100/opts.length;
+    pill.style.left=(i*w)+'%';
+    pill.style.width=w+'%';
+    turbo=opt.dataset.g==='turbo';
+    gear.classList.toggle('turbo',turbo);
+    document.getElementById('edgeTint').classList.toggle('on',turbo);
+  };
+  setGear(document.querySelector('.gear-opt[data-g="norm"]'));
+
+  /* ===== AR toggle ===== */
+  window.toggleAR=function(el){
+    el.classList.toggle('off');
+    el.textContent=el.classList.contains('off')?'AR':'AR';
+    document.getElementById('reticle').classList.toggle('hidden',el.classList.contains('off'));
+  };
+
+  /* ===== Generic joystick drag ===== */
+  function makeStick(baseId,nubId){
+    var base=document.getElementById(baseId),nub=document.getElementById(nubId),dragging=false,baseR;
+    function pos(e){var t=e.touches?e.touches[0]:e;return{x:t.clientX,y:t.clientY}}
+    function start(e){dragging=true;baseR=base.getBoundingClientRect();nub.classList.add('touch');nub.style.transition='none';e.preventDefault()}
+    function move(e){
+      if(!dragging)return;e.preventDefault();
+      var p=pos(e),cx=p.x-baseR.left-baseR.width/2,cy=p.y-baseR.top-baseR.height/2;
+      var max=baseR.width/2-26,d=Math.sqrt(cx*cx+cy*cy),a=Math.atan2(cy,cx),d2=Math.min(d,max);
+      nub.style.transform='translate('+Math.cos(a)*d2+'px,'+Math.sin(a)*d2+'px)';
+      if(baseId.indexOf('L')>=0){
+        /* drive: left stick turns robot body slightly */
+        var robot=document.getElementById('robot');
+        var tilt=Math.max(-6,Math.min(6,cx/max*6));
+        robot.style.transform='translate(-50%,-55%) rotate('+tilt+'deg)';
+      }else{
+        /* right stick: rotates turret */
+        var turret=document.getElementById('turret');
+        var deg=Math.max(-60,Math.min(60,cx/max*50));
+        turret.style.transform='translateX(-50%) rotate('+deg+'deg)';
+      }
+    }
+    function end(){if(!dragging)return;dragging=false;nub.classList.remove('touch');nub.style.transition='transform .3s cubic-bezier(.34,1.56,.64,1)';nub.style.transform='translate(0,0)';setTimeout(function(){nub.style.transition='';document.getElementById('robot').style.transform='';document.getElementById('turret').style.transform='translateX(-50%) rotate(0deg)'},300)}
+    base.addEventListener('mousedown',start);base.addEventListener('touchstart',start,{passive:false});
+    document.addEventListener('mousemove',move);document.addEventListener('touchmove',move,{passive:false});
+    document.addEventListener('mouseup',end);document.addEventListener('touchend',end);
+  }
+  makeStick('joyBaseL','joyNubL');
+  makeStick('joyBaseR','joyNubR');
+
+  /* ===== Shoulder triggers (hold) ===== */
+  window.pressShoulder=function(el){
+    el.classList.add('active');
+    if(el.classList.contains('shoulder-r')){
+      /* turbo boost — screen edge tint */
+      document.getElementById('edgeTint').classList.add('on');
+      triggerShock();
+    }else{
+      /* brake — subtle full-stop pulse on robot */
+      triggerShock();
+    }
+  };
+  window.releaseShoulder=function(el){
+    el.classList.remove('active');
+    if(el.classList.contains('shoulder-r')&&!turbo){
+      document.getElementById('edgeTint').classList.remove('on');
+    }
+  };
+
+  /* ===== Action buttons ===== */
+  window.actionPress=function(el){
+    el.classList.add('holding');
+    if(el.classList.contains('danger')){
+      triggerShock();
+    }
+    if(el.textContent.indexOf('161')>-1){
+      /* light toggle */
+      document.getElementById('headlight').classList.toggle('on');
+    }
+    setTimeout(function(){el.classList.remove('holding')},250);
+  };
+
+  /* collision / bump feedback */
+  function triggerShock(){
+    var s=document.getElementById('shock');
+    s.classList.remove('fire');void s.offsetWidth;s.classList.add('fire');
+  }
+
+  /* ===== Pause ===== */
+  window.showPause=function(show){
+    document.getElementById('pauseOverlay').classList.toggle('show',show);
+  };
+
+  /* ===== Live telemetry ===== */
+  setInterval(function(){
+    document.getElementById('latency').textContent=Math.round(18+Math.random()*12);
+    var blip=document.getElementById('blip');
+    var a=Date.now()/3000;
+    blip.style.left=(50+Math.sin(a)*28)+'%';
+    blip.style.top=(50+Math.cos(a)*28)+'%';
+    /* connection flicker occasionally */
+    if(Math.random()>.98){
+      var d=document.getElementById('connDot');
+      d.classList.add('wait');
+      document.getElementById('connTxt').textContent='Reconnecting';
+      setTimeout(function(){d.classList.remove('wait');document.getElementById('connTxt').textContent='Connected'},900);
+    }
+  },1500);
+
+  /* ===== Landscape lock detection ===== */
+  function checkOrientation(){
+    var lock=document.getElementById('rotLock');
+    var landscape=window.innerWidth>=window.innerHeight;
+    lock.style.display=landscape?'none':'flex';
+  }
+  window.addEventListener('resize',checkOrientation);
+  checkOrientation();
+})();
+</script>
+</body>
+</html>

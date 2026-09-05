@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>ARIN — Settings</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#111318;--surface:#1a1d24;--surface-c:#1e2128;--surface-h:#252830;
+  --fg:#e8eaed;--fg2:#9aa0a6;--muted:#5f6368;--border:#2a2d36;
+  --accent:#00f0ff;--accent-d:rgba(0,240,255,.15);
+  --sec:#7000ff;--sec-d:rgba(112,0,255,.15);
+  --ter:#00f990;--ter-d:rgba(0,249,144,.15);
+  --err:#ff4757;--warn:#ffc048;
+  --fd:'Hanken Grotesk',system-ui,sans-serif;
+  --fb:'Inter',system-ui,sans-serif;
+  --fm:'JetBrains Mono',ui-monospace,monospace;
+  --r-sm:8px;--r-md:12px;--r-lg:16px;--r-full:999px;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--fg);font-family:var(--fb);overflow:hidden;-webkit-font-smoothing:antialiased}
+
+.device{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bg);position:relative;overflow:hidden}
+.status-bar{height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-family:var(--fm);font-size:12px;color:var(--fg2);flex-shrink:0;z-index:10}
+.gesture-bar{height:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.gesture-bar::after{content:'';width:120px;height:4px;background:var(--fg2);border-radius:999px;opacity:.4}
+
+.app{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.header{padding:12px 16px 8px;border-bottom:1px solid var(--border);flex-shrink:0}
+.header h1{font-family:var(--fd);font-size:22px;font-weight:700}
+.header .sub{font-family:var(--fm);font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
+
+.settings{flex:1;overflow-y:auto;padding:12px 16px 16px;display:flex;flex-direction:column;gap:16px;-webkit-overflow-scrolling:touch}
+.settings::-webkit-scrollbar{width:0}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;transition:border-color .3s}
+.card:focus-within{border-color:rgba(0,240,255,.3);box-shadow:0 0 0 1px rgba(0,240,255,.06)}
+.card-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--border)}
+.card-head .title{font-family:var(--fd);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.card-head .title .ico{font-size:18px}
+.card-body{padding:12px 16px 14px;display:flex;flex-direction:column;gap:12px}
+
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-family:var(--fm);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.field input,.field select{padding:10px 12px;border-radius:var(--r-sm);background:var(--surface-c);border:1px solid var(--border);color:var(--fg);font-size:13px;font-family:var(--fb);outline:none;transition:border-color .2s,box-shadow .2s}
+.field input:focus,.field select:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-d)}
+.field select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239aa0a6' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.row .lbl{font-size:14px}
+.row .sub{font-size:12px;color:var(--fg2);margin-top:1px}
+
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:var(--r-full);font-family:var(--fm);font-size:10px;text-transform:uppercase;letter-spacing:.05em;background:var(--surface-c);border:1px solid var(--border)}
+.badge .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;transition:all .3s}
+.badge.ok .dot{background:var(--ter);box-shadow:0 0 8px var(--ter)}
+.badge.wait .dot{background:var(--warn);animation:pulse 1.5s infinite}
+.badge.err .dot{background:var(--err)}
+
+.btn-sm{padding:6px 14px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface-c);color:var(--fg2);font-family:var(--fm);font-size:11px;cursor:pointer;transition:all .2s;text-transform:uppercase;letter-spacing:.04em}
+.btn-sm:hover{border-color:var(--accent);color:var(--accent)}
+.btn-sm:active{transform:scale(.95)}
+
+/* Generic toggle */
+.toggle{width:46px;height:26px;border-radius:13px;background:var(--border);position:relative;cursor:pointer;transition:background .3s;flex-shrink:0;border:none;padding:0}
+.toggle.on{background:var(--accent);box-shadow:0 0 10px rgba(0,240,255,.3)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:#fff;transition:transform .3s cubic-bezier(.34,1.56,.64,1)}
+.toggle.on::after{transform:translateX(20px)}
+
+/* Sun/moon theme switch */
+.theme-switch{width:60px;height:32px;border-radius:16px;background:var(--surface-c);border:1px solid var(--border);position:relative;cursor:pointer;flex-shrink:0;transition:all .3s}
+.theme-switch .track{position:absolute;inset:3px;border-radius:13px;background:linear-gradient(135deg,#2a2d36,#14161b);transition:background .3s;overflow:hidden}
+.theme-switch .knob{position:absolute;top:4px;left:4px;width:22px;height:22px;border-radius:50%;background:#e8eaed;transition:transform .35s cubic-bezier(.34,1.56,.64,1);display:flex;align-items:center;justify-content:center;font-size:12px;z-index:2}
+.theme-switch.light .knob{transform:translateX(28px)}
+.theme-switch.light .track{background:linear-gradient(135deg,#ffd86b,#ff9d3b)}
+.theme-switch .moon{position:absolute;right:6px;top:50%;transform:translateY(-50%);color:rgba(232,234,237,.4);font-size:12px}
+.theme-switch .sun{position:absolute;left:7px;top:50%;transform:translateY(-50%);color:#3a3f4a;font-size:12px}
+
+/* Segmented control */
+.seg{display:flex;background:var(--surface-c);border-radius:var(--r-full);padding:3px;border:1px solid var(--border);position:relative}
+.seg-opt{flex:1;padding:8px 12px;text-align:center;font-size:12px;font-family:var(--fb);color:var(--fg2);cursor:pointer;border-radius:var(--r-full);transition:color .3s;position:relative;z-index:2}
+.seg-opt.active{color:var(--fg)}
+.seg-pill{position:absolute;top:3px;bottom:3px;border-radius:var(--r-full);background:var(--accent-d);border:1px solid rgba(0,240,255,.25);transition:left .3s cubic-bezier(.34,1.56,.64,1);z-index:1}
+
+/* Voice pills */
+.voice-pills{display:flex;gap:8px}
+.voice-pill{flex:1;padding:10px;text-align:center;border-radius:var(--r-md);background:var(--surface-c);border:1px solid var(--border);cursor:pointer;font-size:13px;transition:all .3s}
+.voice-pill.active{background:var(--accent-d);border-color:rgba(0,240,255,.3);color:var(--accent)}
+
+/* Nav */
+.nav{display:flex;border-top:1px solid var(--border);flex-shrink:0;padding-bottom:env(safe-area-inset-bottom,0)}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 6px;text-decoration:none;color:var(--muted);font-size:10px;font-family:var(--fb);transition:color .2s;position:relative}
+.nav-item.active{color:var(--accent)}
+.nav-item.active::before{content:'';position:absolute;top:0;left:25%;right:25%;height:2px;background:var(--accent);border-radius:0 0 2px 2px}
+.nav-item svg{width:22px;height:22px}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="status-bar">
+    <span id="time">12:00</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none"><path d="M1 8h2v4H1zM5 5h2v7H5zM9 3h2v9H9zM13 0h2v12h-2z" fill="currentColor" opacity=".6"/></svg>
+      <svg width="22" height="12" viewBox="0 0 22 12" fill="none"><rect x=".5" y=".5" width="18" height="11" rx="2" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="14" height="8" rx="1" fill="var(--ter)" opacity=".8"/><path d="M20 4v4a2 2 0 000-4z" fill="currentColor" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div class="app">
+    <div class="header">
+      <h1>Settings</h1>
+      <div class="sub">Backend &amp; behavior</div>
+    </div>
+
+    <div class="settings">
+      <!-- Local AI -->
+      <div class="card">
+        <div class="card-head">
+          <span class="title"><span class="ico">&#129504;</span>Local AI</span>
+          <span class="badge ok" id="localBadge"><span class="dot"></span>Connected</span>
+        </div>
+        <div class="card-body">
+          <div class="field"><label>Host</label><input value="localhost:11434"></div>
+          <div class="field"><label>Model</label>
+            <select><option>llama-3.2-1B (active)</option><option>llama-3.2-3B</option><option>phi-3-mini</option><option>gemma-2-2b</option></select>
+          </div>
+          <button class="btn-sm" onclick="testConn(this,'localBadge')">Test Connection</button>
+        </div>
+      </div>
+
+      <!-- Cloud AI -->
+      <div class="card">
+        <div class="card-head">
+          <span class="title"><span class="ico">&#9729;</span>Cloud AI</span>
+          <span class="badge ok" id="cloudBadge"><span class="dot"></span>Connected</span>
+        </div>
+        <div class="card-body">
+          <div class="field"><label>Provider</label>
+            <select><option>OpenAI</option><option>Anthropic</option><option>Google</option></select>
+          </div>
+          <div class="field"><label>API Key</label><input type="password" value="sk-xxxxxxxxxxxx" id="apiKey"></div>
+          <div class="field"><label>Model</label>
+            <select><option>gpt-4o-mini (active)</option><option>gpt-4o</option><option>claude-3.5-sonnet</option></select>
+          </div>
+          <button class="btn-sm" onclick="toggleKey()">Show Key</button>
+        </div>
+      </div>
+
+      <!-- Arduino -->
+      <div class="card">
+        <div class="card-head">
+          <span class="title"><span class="ico">&#128187;</span>Arduino / BLE</span>
+          <span class="badge wait" id="ardBadge"><span class="dot"></span>Pairing</span>
+        </div>
+        <div class="card-body">
+          <div class="field"><label>Device Name</label><input value="ARIN-BOT-042" readonly style="opacity:.7"></div>
+          <div class="row">
+            <div><div class="lbl">BLE Signal</div><div class="sub">Strong — -42 dBm</div></div>
+            <button class="btn-sm" onclick="testConn(this,'ardBadge',true)">Reconnect</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Appearance / theme -->
+      <div class="card">
+        <div class="card-head"><span class="title"><span class="ico">&#127769;</span>Appearance</span></div>
+        <div class="card-body">
+          <div class="row">
+            <div><div class="lbl">Theme</div><div class="sub">Dark Robot OS is default</div></div>
+            <div class="theme-switch" id="themeSwitch" onclick="toggleTheme(this)">
+              <div class="track"></div>
+              <span class="sun">&#9728;</span>
+              <span class="moon">&#9789;</span>
+              <div class="knob">&#9790;</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Permission mode -->
+      <div class="card">
+        <div class="card-head"><span class="title"><span class="ico">&#128274;</span>Control Mode</span></div>
+        <div class="card-body">
+          <div class="seg" id="segCtrl">
+            <div class="seg-pill" id="segPill"></div>
+            <div class="seg-opt active" onclick="setSeg(this,0)">Full Control</div>
+            <div class="seg-opt" onclick="setSeg(this,1)">Compatible</div>
+          </div>
+          <div class="sub" style="font-size:12px;color:var(--fg2)">Full Control unlocks every motor + sensor command. Compatible restricts to safe movements only.</div>
+        </div>
+      </div>
+
+      <!-- TTS -->
+      <div class="card">
+        <div class="card-head"><span class="title"><span class="ico">&#127908;</span>Voice Output</span></div>
+        <div class="card-body">
+          <div class="row">
+            <div><div class="lbl">Auto-speak</div><div class="sub">Read ARIN responses aloud</div></div>
+            <button class="toggle on" onclick="this.classList.toggle('on')"></button>
+          </div>
+          <div><label style="font-family:var(--fm);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:8px">Voice</label>
+            <div class="voice-pills">
+              <div class="voice-pill active" onclick="setVoice(this)">Male</div>
+              <div class="voice-pill" onclick="setVoice(this)">Female</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a class="nav-item" href="dashboard.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>Dashboard</span>
+      </a>
+      <a class="nav-item" href="test.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>Test</span>
+      </a>
+      <a class="nav-item" href="controller.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="3"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/><circle cx="16" cy="10" r="1" fill="currentColor"/><circle cx="18" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="14" r="1" fill="currentColor"/><circle cx="14" cy="12" r="1" fill="currentColor"/></svg>
+        <span>Controller</span>
+      </a>
+      <a class="nav-item active" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+  </div>
+  <div class="gesture-bar"></div>
+</div>
+<script>
+(function(){
+  /* seed segmented pill */
+  var seg=document.getElementById('segCtrl'),pill=document.getElementById('segPill');
+  pill.style.left='3px';pill.style.width='calc(50% - 3px)';
+
+  window.testConn=function(btn,badgeId,reconnect){
+    var orig=btn.textContent;btn.textContent='Testing...';btn.style.opacity='.6';
+    var badge=document.getElementById(badgeId);
+    badge.className='badge wait';badge.querySelector('.dot').style.animation='pulse 1.5s infinite';badge.lastChild.textContent=' Testing';
+    setTimeout(function(){
+      btn.textContent='Passed';btn.style.opacity='1';btn.style.color='var(--ter)';btn.style.borderColor='var(--ter)';
+      badge.className='badge ok';badge.querySelector('.dot').style.animation='';badge.lastChild.textContent=' Connected';
+      setTimeout(function(){btn.textContent=orig;btn.style.color='';btn.style.borderColor=''},1500);
+    },1200);
+  };
+
+  window.toggleKey=function(){
+    var k=document.getElementById('apiKey');
+    k.type=k.type==='password'?'text':'password';
+    document.querySelector('[onclick="toggleKey()"]').textContent=k.type==='password'?'Show Key':'Hide Key';
+  };
+
+  window.setSeg=function(opt,i){
+    var opts=seg.querySelectorAll('.seg-opt');
+    opts.forEach(function(o){o.classList.remove('active')});opt.classList.add('active');
+    pill.style.left=(i===0?'3px':'calc(50%)');
+    pill.style.width='calc(50% - 3px)';
+  };
+
+  window.setVoice=function(el){
+    el.parentElement.querySelectorAll('.voice-pill').forEach(function(p){p.classList.remove('active')});
+    el.classList.add('active');
+  };
+
+  window.toggleTheme=function(el){
+    el.classList.toggle('light');
+    var dark=!el.classList.contains('light');
+    el.querySelector('.knob').innerHTML=dark?'&#9790;':'&#9728;';
+    el.querySelector('.knob').style.background=dark?'#e8eaed':'#ffd86b';
+  };
+
+  var now=new Date();document.getElementById('time').textContent=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+})();
+</script>
+</body>
+</html>

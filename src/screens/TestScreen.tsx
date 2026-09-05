@@ -81,6 +81,22 @@ export const TestScreen: React.FC = () => {
         </TouchableOpacity>
       </View>
 
+      {/* TELEMETRY METRICS SUMMARY BAR */}
+      <View style={{ flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.xs }}>
+        <View style={{ flex: 1, padding: 8, borderRadius: 8, backgroundColor: themeColors.surfaceContainerLow, borderWidth: 1, borderColor: themeColors.outlineVariant, alignItems: 'center' }}>
+          <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, fontSize: 9 }]}>ULTRASONIC DIST</Text>
+          <Text style={[typography.headlineMedium, { color: themeColors.tertiaryContainer, fontSize: 16 }]}>42 CM</Text>
+        </View>
+        <View style={{ flex: 1, padding: 8, borderRadius: 8, backgroundColor: themeColors.surfaceContainerLow, borderWidth: 1, borderColor: themeColors.outlineVariant, alignItems: 'center' }}>
+          <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, fontSize: 9 }]}>MOTOR SPEED</Text>
+          <Text style={[typography.headlineMedium, { color: themeColors.primaryContainer, fontSize: 16 }]}>200 PWM</Text>
+        </View>
+        <View style={{ flex: 1, padding: 8, borderRadius: 8, backgroundColor: themeColors.surfaceContainerLow, borderWidth: 1, borderColor: themeColors.outlineVariant, alignItems: 'center' }}>
+          <Text style={[typography.labelCaps, { color: themeColors.onSurfaceVariant, fontSize: 9 }]}>SERIAL BAUD</Text>
+          <Text style={[typography.headlineMedium, { color: themeColors.secondary, fontSize: 16 }]}>115200</Text>
+        </View>
+      </View>
+
       {/* FULLSCREEN REAL-TIME LOG STREAM WINDOW */}
       <View style={[styles.logConsoleWindow, { backgroundColor: themeColors.surfaceContainerLow, borderColor: themeColors.outlineVariant }]}>
         {testLogs.length === 0 ? (
